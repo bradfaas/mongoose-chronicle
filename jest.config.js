@@ -17,6 +17,10 @@ module.exports = {
       tsconfig: 'tsconfig.json'
     }]
   },
-  testTimeout: 30000,
-  verbose: true
+  testTimeout: 60000, // Increased for MongoDB memory server startup
+  verbose: true,
+  // Run tests sequentially to avoid MongoDB connection conflicts
+  maxWorkers: 1,
+  // Setup file for global configuration
+  setupFilesAfterEnv: ['<rootDir>/tests/jest.setup.ts'],
 };

@@ -1,4 +1,4 @@
-import { Schema, Types, Connection } from 'mongoose';
+import { Schema, Types, Connection, Document } from 'mongoose';
 import type {
   ChroniclePluginOptions,
   ChronicleChunk,
@@ -7,12 +7,39 @@ import type {
 import {
   ChronicleMetadataSchema,
   ChronicleBranchSchema,
-  ChronicleConfigSchema,
+  createChronicleKeysSchema,
 } from './schemas';
+import {
+  analyzeSchemaIndexes,
+  generateChronicleIndexes,
+  type SchemaIndexAnalysis,
+} from '../utils/schema-analyzer';
+import {
+  processChroniclesSave,
+  type ChronicleContext,
+  ChronicleUniqueConstraintError,
+} from './chronicle-operations';
 
 const PLUGIN_VERSION = '1.0.0';
 const DEFAULT_FULL_CHUNK_INTERVAL = 10;
 const DEFAULT_CONFIG_COLLECTION = 'chronicle_config';
+
+/** Symbol to store chronicle analysis on the schema */
+const CHRONICLE_ANALYSIS = Symbol('chronicleAnalysis');
+
+/** Symbol to store chronicle context on documents */
+const CHRONICLE_DOC_ID = Symbol('chronicleDocId');
+
+/** Extended schema type with chronicle data */
+interface ChronicleSchema extends Schema {
+  chronicleOptions?: ChroniclePluginOptions;
+  [CHRONICLE_ANALYSIS]?: SchemaIndexAnalysis;
+}
+
+/** Extended document type with chronicle data */
+interface ChronicleEnabledDocument extends Document {
+  [CHRONICLE_DOC_ID]?: Types.ObjectId;
+}
 
 /**
  * The main mongoose-chronicle plugin function
@@ -22,19 +49,29 @@ export function chroniclePlugin(
   schema: Schema,
   options: ChroniclePluginOptions = {}
 ): void {
+  const chronicleSchema = schema as ChronicleSchema;
+
   const {
     primaryKey = '_id',
     fullChunkInterval = DEFAULT_FULL_CHUNK_INTERVAL,
     configCollectionName = DEFAULT_CONFIG_COLLECTION,
   } = options;
 
-  // Store plugin options on schema for later access
-  (schema as Schema & { chronicleOptions: ChroniclePluginOptions }).chronicleOptions = {
+  // Analyze the original schema for indexes and unique constraints
+  const analysis = analyzeSchemaIndexes(schema);
+
+  // Store plugin options and analysis on schema for later access
+  chronicleSchema.chronicleOptions = {
     primaryKey,
     fullChunkInterval,
     configCollectionName,
+    // Override with analyzed values if not provided in options
+    indexes: options.indexes ?? analysis.indexedFields.map(f => f.path),
+    uniqueKeys: options.uniqueKeys ?? analysis.uniqueFields.map(f => f.path),
     ...options,
   };
+
+  chronicleSchema[CHRONICLE_ANALYSIS] = analysis;
 
   // Add chronicle-specific instance methods
   addInstanceMethods(schema);
@@ -43,7 +80,21 @@ export function chroniclePlugin(
   addStaticMethods(schema);
 
   // Override middleware for CRUD operations
-  addMiddleware(schema);
+  addMiddleware(schema, chronicleSchema.chronicleOptions);
+}
+
+/**
+ * Gets the chronicle analysis for a schema
+ */
+export function getChronicleAnalysis(schema: Schema): SchemaIndexAnalysis | undefined {
+  return (schema as ChronicleSchema)[CHRONICLE_ANALYSIS];
+}
+
+/**
+ * Gets the chronicle options for a schema
+ */
+export function getChronicleOptions(schema: Schema): ChroniclePluginOptions | undefined {
+  return (schema as ChronicleSchema).chronicleOptions;
 }
 
 /**
@@ -110,20 +161,66 @@ function addStaticMethods(schema: Schema): void {
 }
 
 /**
+ * Creates a chronicle context for operations
+ */
+function createChronicleContext(
+  connection: Connection,
+  baseCollectionName: string,
+  chunksCollectionName: string,
+  options: ChroniclePluginOptions
+): ChronicleContext {
+  return {
+    connection,
+    baseCollectionName,
+    chunksCollectionName,
+    options,
+    uniqueFields: options.uniqueKeys ?? [],
+    indexedFields: options.indexes ?? [],
+  };
+}
+
+/**
  * Adds middleware hooks to intercept CRUD operations
  */
-function addMiddleware(schema: Schema): void {
+function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
   // Pre-save hook for create and update operations
   schema.pre('save', async function(next) {
-    // TODO: Implement save interception
-    // - For new documents: create metadata, branch, and full chunk
-    // - For existing documents: create delta or full chunk
-    next();
+    const doc = this as ChronicleEnabledDocument;
+    const connection = doc.db;
+    // Use the original collection name for chronicle chunks
+    const baseCollectionName = doc.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+
+    // Create chronicle context with both collection names
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+
+    try {
+      // Process the save through chronicle
+      const result = await processChroniclesSave(ctx, doc, doc.isNew);
+
+      // Store the chronicle docId on the document for reference
+      doc[CHRONICLE_DOC_ID] = result.docId;
+
+      // Continue with normal mongoose save - the original document is still saved
+      // for compatibility with existing queries
+      next();
+    } catch (error) {
+      if (error instanceof ChronicleUniqueConstraintError) {
+        // Convert to a mongoose-style error
+        const mongooseError = new Error(error.message) as Error & { code: number };
+        mongooseError.name = 'MongoServerError';
+        mongooseError.code = 11000; // Duplicate key error code
+        next(mongooseError);
+      } else {
+        next(error as Error);
+      }
+    }
   });
 
   // Pre-find hooks to rehydrate documents
   schema.pre('find', function() {
     // TODO: Implement query rewriting for find operations
+    // For now, queries work on raw chronicle data
   });
 
   schema.pre('findOne', function() {
@@ -155,49 +252,95 @@ function addMiddleware(schema: Schema): void {
 export async function initializeChronicle(
   connection: Connection,
   collectionName: string,
-  options: ChroniclePluginOptions = {}
+  options: ChroniclePluginOptions = {},
+  schemaAnalysis?: SchemaIndexAnalysis
 ): Promise<void> {
   const {
     fullChunkInterval = DEFAULT_FULL_CHUNK_INTERVAL,
     configCollectionName = DEFAULT_CONFIG_COLLECTION,
     metadataCollectionName = `${collectionName}_chronicle_metadata`,
+    indexes = [],
+    uniqueKeys = [],
   } = options;
 
-  // Ensure config collection exists and has entry for this collection
-  const ConfigModel = connection.model(
-    'ChronicleConfig',
-    ChronicleConfigSchema,
-    configCollectionName
-  );
+  // Get or create the config model - use native MongoDB driver for simplicity
+  if (!connection.db) {
+    throw new Error('Database connection not established. Ensure mongoose is connected before calling initializeChronicle.');
+  }
 
-  await ConfigModel.findOneAndUpdate(
+  // Determine indexed and unique fields
+  const indexedFields = schemaAnalysis
+    ? schemaAnalysis.indexedFields.map(f => f.path)
+    : indexes;
+  const uniqueFields = schemaAnalysis
+    ? schemaAnalysis.uniqueFields.map(f => f.path)
+    : uniqueKeys;
+
+  const configCollection = connection.db.collection(configCollectionName);
+
+  await configCollection.updateOne(
     { collectionName },
     {
-      collectionName,
-      fullChunkInterval,
-      pluginVersion: PLUGIN_VERSION,
+      $set: {
+        collectionName,
+        fullChunkInterval,
+        pluginVersion: PLUGIN_VERSION,
+        indexedFields,
+        uniqueFields,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        createdAt: new Date(),
+      },
     },
-    { upsert: true, new: true }
+    { upsert: true }
   );
 
   // Ensure metadata collection exists
-  if (!connection.models['ChronicleMetadata_' + collectionName]) {
-    connection.model(
-      'ChronicleMetadata_' + collectionName,
-      ChronicleMetadataSchema,
-      metadataCollectionName
-    );
+  const metadataModelName = `ChronicleMetadata_${collectionName}`;
+  if (!connection.models[metadataModelName]) {
+    connection.model(metadataModelName, ChronicleMetadataSchema, metadataCollectionName);
   }
 
   // Ensure branch collection exists
   const branchCollectionName = `${collectionName}_chronicle_branches`;
-  if (!connection.models['ChronicleBranch_' + collectionName]) {
-    connection.model(
-      'ChronicleBranch_' + collectionName,
-      ChronicleBranchSchema,
-      branchCollectionName
-    );
+  const branchModelName = `ChronicleBranch_${collectionName}`;
+  if (!connection.models[branchModelName]) {
+    connection.model(branchModelName, ChronicleBranchSchema, branchCollectionName);
+  }
+
+  // Create the keys collection if there are unique fields
+  if (uniqueFields.length > 0) {
+    const keysCollectionName = `${collectionName}_chronicle_keys`;
+    const keysModelName = `ChronicleKeys_${collectionName}`;
+    if (!connection.models[keysModelName]) {
+      const keysSchema = createChronicleKeysSchema(uniqueFields);
+      connection.model(keysModelName, keysSchema, keysCollectionName);
+    }
+  }
+
+  // Create optimized indexes on the main collection for payload fields
+  if (schemaAnalysis && indexedFields.length > 0) {
+    const chronicleIndexes = generateChronicleIndexes(schemaAnalysis, collectionName);
+
+    // Create indexes on the chronicle chunks collection (same as original collection name)
+    const chunksCollection = connection.db.collection(collectionName);
+
+    for (const idx of chronicleIndexes) {
+      try {
+        await chunksCollection.createIndex(idx.spec, idx.options);
+      } catch (error) {
+        // Index might already exist, which is fine
+        const err = error as Error;
+        if (!err.message?.includes('already exists')) {
+          console.warn(`Warning: Could not create index ${idx.options.name}: ${err.message}`);
+        }
+      }
+    }
   }
 }
+
+// Re-export for convenience
+export { ChronicleUniqueConstraintError } from './chronicle-operations';
 
 export default chroniclePlugin;

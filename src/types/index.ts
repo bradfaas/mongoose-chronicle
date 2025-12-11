@@ -104,6 +104,8 @@ export interface ChronicleChunk<T = Record<string, unknown>> {
   ccType: ChunkType;
   /** Soft delete flag */
   isDeleted: boolean;
+  /** Flag indicating this is the latest chunk for docId+branchId */
+  isLatest: boolean;
   /** Creation timestamp */
   cTime: Date;
   /** The payload - either full document or delta changes */
@@ -121,6 +123,30 @@ export interface ChronicleConfig {
   fullChunkInterval: number;
   /** Plugin version for migrations */
   pluginVersion: string;
+  /** Fields that are indexed in the original schema */
+  indexedFields: string[];
+  /** Fields that have unique constraints in the original schema */
+  uniqueFields: string[];
+  /** Creation timestamp */
+  createdAt: Date;
+  /** Last updated timestamp */
+  updatedAt: Date;
+}
+
+/**
+ * Chronicle Keys document structure
+ * Maintains current unique key values for fast uniqueness checks
+ */
+export interface ChronicleKeys {
+  _id: Types.ObjectId;
+  /** Reference to the document */
+  docId: Types.ObjectId;
+  /** Branch this key entry belongs to */
+  branchId: Types.ObjectId;
+  /** Whether the document is deleted */
+  isDeleted: boolean;
+  /** Dynamic key fields prefixed with key_ */
+  [key: `key_${string}`]: unknown;
   /** Creation timestamp */
   createdAt: Date;
   /** Last updated timestamp */

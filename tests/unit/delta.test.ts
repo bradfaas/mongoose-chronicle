@@ -1,4 +1,4 @@
-import { computeDelta, applyDelta, applyDeltas, isDeltaEmpty } from '../src/utils/delta';
+import { computeDelta, applyDelta, applyDeltas, isDeltaEmpty } from '../../src/utils/delta';
 
 describe('Delta utilities', () => {
   describe('computeDelta', () => {
