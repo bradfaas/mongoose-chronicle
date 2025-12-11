@@ -58,10 +58,11 @@ export declare function clearIsLatestFlag(ctx: ChronicleContext, docId: Types.Ob
 /**
  * Gets or creates the chronicle metadata for a document
  * @param ctx - Chronicle context
- * @param docId - Document ID (or undefined for new documents)
+ * @param docId - Document ID (MongoDB _id - Mongoose assigns this before save even for new docs)
+ * @param isNew - Whether this is a new document being created
  * @returns The document state including branch and serial info
  */
-export declare function getOrCreateDocumentState(ctx: ChronicleContext, docId?: Types.ObjectId): Promise<ChronicleDocumentState>;
+export declare function getOrCreateDocumentState(ctx: ChronicleContext, docId: Types.ObjectId, isNew: boolean): Promise<ChronicleDocumentState>;
 /**
  * Rehydrates a document from its chunks
  * @param ctx - Chronicle context

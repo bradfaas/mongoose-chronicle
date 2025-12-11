@@ -170,12 +170,14 @@ export async function clearIsLatestFlag(
 /**
  * Gets or creates the chronicle metadata for a document
  * @param ctx - Chronicle context
- * @param docId - Document ID (or undefined for new documents)
+ * @param docId - Document ID (MongoDB _id - Mongoose assigns this before save even for new docs)
+ * @param isNew - Whether this is a new document being created
  * @returns The document state including branch and serial info
  */
 export async function getOrCreateDocumentState(
   ctx: ChronicleContext,
-  docId?: Types.ObjectId
+  docId: Types.ObjectId,
+  isNew: boolean
 ): Promise<ChronicleDocumentState> {
   const metadataCollectionName = ctx.options.metadataCollectionName ??
     `${ctx.baseCollectionName}_chronicle_metadata`;
@@ -189,15 +191,15 @@ export async function getOrCreateDocumentState(
     throw new Error('Chronicle collections not initialized');
   }
 
-  // For new documents
-  if (!docId) {
-    const newDocId = new Types.ObjectId();
+  // For new documents - use the MongoDB _id as the chronicle docId
+  // This ensures consistency between the document's _id and chronicle tracking
+  if (isNew) {
     const newBranchId = new Types.ObjectId();
 
-    // Create the main branch
+    // Create the main branch using the document's _id
     await branchCollection.insertOne({
       _id: newBranchId,
-      docId: newDocId,
+      docId: docId, // Use the MongoDB _id
       parentBranchId: null,
       parentSerial: null,
       name: 'main',
@@ -207,7 +209,7 @@ export async function getOrCreateDocumentState(
     // Create metadata pointing to main branch
     await metadataCollection.insertOne({
       _id: new Types.ObjectId(),
-      docId: newDocId,
+      docId: docId, // Use the MongoDB _id
       activeBranchId: newBranchId,
       metadataStatus: 'pending',
       createdAt: new Date(),
@@ -215,14 +217,14 @@ export async function getOrCreateDocumentState(
     });
 
     return {
-      docId: newDocId,
+      docId: docId, // Return the MongoDB _id
       branchId: newBranchId,
       currentSerial: 0,
       isNew: true,
     };
   }
 
-  // For existing documents
+  // For existing documents - look up by the MongoDB _id
   const metadata = await metadataCollection.findOne({ docId });
 
   if (!metadata) {
@@ -425,9 +427,12 @@ export async function processChroniclesSave(
   delete payload.__v;
 
   // Get or create document state
+  // Always pass doc._id - Mongoose assigns _id before save even for new documents
+  // This ensures chronicle docId matches the MongoDB _id for consistent lookups
   const state = await getOrCreateDocumentState(
     ctx,
-    isNew ? undefined : (doc._id as Types.ObjectId)
+    doc._id as Types.ObjectId,
+    isNew
   );
 
   // Validate unique constraints

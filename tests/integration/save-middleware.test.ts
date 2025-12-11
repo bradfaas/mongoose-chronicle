@@ -130,6 +130,42 @@ describe('Save Middleware', () => {
       expect(loadedDoc).toBeDefined();
     });
 
+    it('should successfully update an existing document', async () => {
+      const testSchema = new Schema({
+        name: { type: String, required: true },
+        value: { type: Number },
+      });
+      testSchema.plugin(chroniclePlugin);
+
+      const TestModel = connection.model('SaveTest4a', testSchema, 'save_test_4a');
+      await initializeChronicle(connection, 'save_test_4a');
+
+      // Create document
+      const doc = new TestModel({ name: 'Original', value: 1 });
+      await doc.save();
+
+      // Verify initial chunk was created with document's _id as docId
+      const initialChunk = await connection.db?.collection('save_test_4a_chronicle_chunks').findOne({ serial: 1 });
+      expect(initialChunk).toBeDefined();
+      expect(initialChunk?.docId.toString()).toBe(doc._id.toString()); // docId should match MongoDB _id
+
+      // Update the document
+      doc.name = 'Updated';
+      doc.value = 2;
+      await doc.save(); // This should NOT throw "metadata not found" error
+
+      // Verify a second chunk was created
+      const chunks = await connection.db?.collection('save_test_4a_chronicle_chunks')
+        .find({ docId: doc._id })
+        .sort({ serial: 1 })
+        .toArray();
+
+      expect(chunks).toHaveLength(2);
+      expect(chunks?.[0]?.ccType).toBe(1); // First chunk is FULL
+      expect(chunks?.[1]?.ccType).toBe(2); // Second chunk is DELTA
+      expect(chunks?.[1]?.payload).toMatchObject({ name: 'Updated', value: 2 });
+    });
+
     it('should mark previous chunk as not latest when creating new chunk', async () => {
       const testSchema = new Schema({
         name: { type: String, required: true },
@@ -153,6 +189,38 @@ describe('Save Middleware', () => {
         .toArray();
 
       expect(latestChunks).toHaveLength(2);
+    });
+
+    it('should mark previous chunk as not latest on same document update', async () => {
+      const testSchema = new Schema({
+        name: { type: String, required: true },
+        counter: { type: Number },
+      });
+      testSchema.plugin(chroniclePlugin);
+
+      const TestModel = connection.model('SaveTest5a', testSchema, 'save_test_5a');
+      await initializeChronicle(connection, 'save_test_5a');
+
+      // Create document
+      const doc = new TestModel({ name: 'Counter', counter: 0 });
+      await doc.save();
+
+      // Update the document
+      doc.counter = 1;
+      await doc.save();
+
+      // Only the latest chunk should have isLatest=true
+      const latestChunks = await connection.db?.collection('save_test_5a_chronicle_chunks')
+        .find({ docId: doc._id, isLatest: true })
+        .toArray();
+
+      expect(latestChunks).toHaveLength(1);
+      expect(latestChunks?.[0]?.serial).toBe(2);
+
+      // First chunk should have isLatest=false
+      const firstChunk = await connection.db?.collection('save_test_5a_chronicle_chunks')
+        .findOne({ docId: doc._id, serial: 1 });
+      expect(firstChunk?.isLatest).toBe(false);
     });
   });
 
