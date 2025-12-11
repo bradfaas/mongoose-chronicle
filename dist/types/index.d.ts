@@ -1,0 +1,178 @@
+import type { Types, Document } from 'mongoose';
+/**
+ * ChronicleChunk types
+ * 1 = full (fully hydrated payload/Original Document)
+ * 2 = delta (payload is only the changes since previous Chunk)
+ */
+export declare enum ChunkType {
+    FULL = 1,
+    DELTA = 2
+}
+/**
+ * Configuration options for the mongoose-chronicle plugin
+ */
+export interface ChroniclePluginOptions {
+    /**
+     * The property name to use as the document identifier.
+     * Defaults to '_id' of the original document.
+     */
+    primaryKey?: string;
+    /**
+     * Number of delta chunks before creating a new full chunk.
+     * Defaults to 10.
+     */
+    fullChunkInterval?: number;
+    /**
+     * Array of field names that should be indexed in the payload.
+     * If not specified, indexes from original schema are used.
+     */
+    indexes?: string[];
+    /**
+     * Array of field names that should have unique constraints.
+     * If not specified, unique fields from original schema are used.
+     */
+    uniqueKeys?: string[];
+    /**
+     * Name of the collection to store chronicle configuration.
+     * Defaults to 'chronicle_config'.
+     */
+    configCollectionName?: string;
+    /**
+     * Name of the collection to store chronicle metadata.
+     * Defaults to '{originalCollectionName}_chronicle_metadata'.
+     */
+    metadataCollectionName?: string;
+}
+/**
+ * Chronicle Metadata document schema
+ * Stores metadata about chronicle documents like active branch
+ */
+export interface ChronicleMetadata {
+    _id: Types.ObjectId;
+    /** The docId this metadata belongs to */
+    docId: Types.ObjectId;
+    /** Currently active branch for this document */
+    activeBranchId: Types.ObjectId;
+    /** Status of metadata: 'pending' | 'active' | 'orphaned' */
+    metadataStatus: 'pending' | 'active' | 'orphaned';
+    /** Creation timestamp */
+    createdAt: Date;
+    /** Last updated timestamp */
+    updatedAt: Date;
+}
+/**
+ * Branch document schema
+ * Represents a branch in the chronicle history
+ */
+export interface ChronicleBranch {
+    _id: Types.ObjectId;
+    /** The docId this branch belongs to */
+    docId: Types.ObjectId;
+    /** Parent branch ID (null for main branch) */
+    parentBranchId: Types.ObjectId | null;
+    /** Serial number in parent branch where this branch was created */
+    parentSerial: number | null;
+    /** Human-readable name for the branch */
+    name: string;
+    /** Creation timestamp */
+    createdAt: Date;
+}
+/**
+ * ChronicleChunk document structure
+ * The wrapper document that stores original documents with versioning
+ */
+export interface ChronicleChunk<T = Record<string, unknown>> {
+    /** Unique ChronicleChunk ID */
+    _id: Types.ObjectId;
+    /** Identifies the unique original document */
+    docId: Types.ObjectId;
+    /** Branch this chunk belongs to */
+    branchId: Types.ObjectId;
+    /** Sequential number within the branch, starts at 1 */
+    serial: number;
+    /** Chunk type: 1 = full, 2 = delta */
+    ccType: ChunkType;
+    /** Soft delete flag */
+    isDeleted: boolean;
+    /** Flag indicating this is the latest chunk for docId+branchId */
+    isLatest: boolean;
+    /** Creation timestamp */
+    cTime: Date;
+    /** The payload - either full document or delta changes */
+    payload: Partial<T>;
+}
+/**
+ * Chronicle configuration stored in the config collection
+ */
+export interface ChronicleConfig {
+    _id: Types.ObjectId;
+    /** Collection name this config applies to */
+    collectionName: string;
+    /** Full chunk interval setting */
+    fullChunkInterval: number;
+    /** Plugin version for migrations */
+    pluginVersion: string;
+    /** Fields that are indexed in the original schema */
+    indexedFields: string[];
+    /** Fields that have unique constraints in the original schema */
+    uniqueFields: string[];
+    /** Creation timestamp */
+    createdAt: Date;
+    /** Last updated timestamp */
+    updatedAt: Date;
+}
+/**
+ * Chronicle Keys document structure
+ * Maintains current unique key values for fast uniqueness checks
+ */
+export interface ChronicleKeys {
+    _id: Types.ObjectId;
+    /** Reference to the document */
+    docId: Types.ObjectId;
+    /** Branch this key entry belongs to */
+    branchId: Types.ObjectId;
+    /** Whether the document is deleted */
+    isDeleted: boolean;
+    /** Dynamic key fields prefixed with key_ */
+    [key: `key_${string}`]: unknown;
+    /** Creation timestamp */
+    createdAt: Date;
+    /** Last updated timestamp */
+    updatedAt: Date;
+}
+/**
+ * Options for querying historical data
+ */
+export interface ChronicleQueryOptions {
+    /** Get document state as of this date/time */
+    asOf?: Date;
+    /** Specific branch to query */
+    branchId?: Types.ObjectId;
+    /** Include deleted documents */
+    includeDeleted?: boolean;
+}
+/**
+ * Extended document type with chronicle methods
+ */
+export interface ChronicleDocument extends Document {
+    /** Get the chronicle history for this document */
+    getHistory(): Promise<ChronicleChunk[]>;
+    /** Create a snapshot at the current state */
+    createSnapshot(name: string): Promise<ChronicleBranch>;
+    /** Get available branches for this document */
+    getBranches(): Promise<ChronicleBranch[]>;
+}
+/**
+ * Extended schema type with chronicle static methods
+ */
+export interface ChronicleModel<T extends Document> {
+    /** Find document as it existed at a specific point in time */
+    findAsOf(filter: Record<string, unknown>, asOf: Date): Promise<T | null>;
+    /** Create a new branch from a document's current state */
+    createBranch(docId: Types.ObjectId, branchName: string): Promise<ChronicleBranch>;
+    /** Switch to a different branch */
+    switchBranch(docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
+    /** Get all branches for a document */
+    listBranches(docId: Types.ObjectId): Promise<ChronicleBranch[]>;
+}
+//# sourceMappingURL=index.d.ts.map

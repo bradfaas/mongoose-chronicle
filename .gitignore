@@ -2,7 +2,7 @@
 node_modules/
 
 # Build output
-dist/
+# Note: dist/ is NOT ignored - it's committed so the package can be installed from GitHub
 
 # Coverage
 coverage/
