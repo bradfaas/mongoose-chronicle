@@ -184,7 +184,8 @@ function createChronicleContext(
  */
 function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
   // Pre-save hook for create and update operations
-  schema.pre('save', async function(next) {
+  // Note: Mongoose 9.x async middleware should not use next() - just return or throw
+  schema.pre('save', async function() {
     const doc = this as ChronicleEnabledDocument;
     const connection = doc.db;
     // Use the original collection name for chronicle chunks
@@ -201,19 +202,16 @@ function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
       // Store the chronicle docId on the document for reference
       doc[CHRONICLE_DOC_ID] = result.docId;
 
-      // Continue with normal mongoose save - the original document is still saved
-      // for compatibility with existing queries
-      next();
+      // Mongoose 9.x: async middleware continues automatically, no need to call next()
     } catch (error) {
       if (error instanceof ChronicleUniqueConstraintError) {
         // Convert to a mongoose-style error
         const mongooseError = new Error(error.message) as Error & { code: number };
         mongooseError.name = 'MongoServerError';
         mongooseError.code = 11000; // Duplicate key error code
-        next(mongooseError);
-      } else {
-        next(error as Error);
+        throw mongooseError;
       }
+      throw error;
     }
   });
 

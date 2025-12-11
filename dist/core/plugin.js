@@ -117,7 +117,8 @@ function createChronicleContext(connection, baseCollectionName, chunksCollection
  */
 function addMiddleware(schema, options) {
     // Pre-save hook for create and update operations
-    schema.pre('save', async function (next) {
+    // Note: Mongoose 9.x async middleware should not use next() - just return or throw
+    schema.pre('save', async function () {
         const doc = this;
         const connection = doc.db;
         // Use the original collection name for chronicle chunks
@@ -130,9 +131,7 @@ function addMiddleware(schema, options) {
             const result = await (0, chronicle_operations_1.processChroniclesSave)(ctx, doc, doc.isNew);
             // Store the chronicle docId on the document for reference
             doc[CHRONICLE_DOC_ID] = result.docId;
-            // Continue with normal mongoose save - the original document is still saved
-            // for compatibility with existing queries
-            next();
+            // Mongoose 9.x: async middleware continues automatically, no need to call next()
         }
         catch (error) {
             if (error instanceof chronicle_operations_1.ChronicleUniqueConstraintError) {
@@ -140,11 +139,9 @@ function addMiddleware(schema, options) {
                 const mongooseError = new Error(error.message);
                 mongooseError.name = 'MongoServerError';
                 mongooseError.code = 11000; // Duplicate key error code
-                next(mongooseError);
+                throw mongooseError;
             }
-            else {
-                next(error);
-            }
+            throw error;
         }
     });
     // Pre-find hooks to rehydrate documents
