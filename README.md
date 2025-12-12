@@ -245,14 +245,23 @@ const pastState = await Product.findAsOf(
   new Date('2025-01-01')
 );
 
-// Create a new branch from a document
+// Create a new branch from a document (auto-activates by default)
 const branch = await Product.createBranch(docId, 'experimental-pricing');
+
+// Create a branch without activating it
+const archiveBranch = await Product.createBranch(docId, 'archived-snapshot', { activate: false });
+
+// Create a branch from a specific serial (point in history)
+const branch = await Product.createBranch(docId, 'hotfix', { fromSerial: 5 });
 
 // Switch active branch for a document
 await Product.switchBranch(docId, branchId);
 
 // List all branches for a document
 const branches = await Product.listBranches(docId);
+
+// Get the currently active branch for a document
+const activeBranch = await Product.getActiveBranch(docId);
 ```
 
 ### Utility Functions
@@ -291,21 +300,73 @@ console.log(analysis.compoundIndexes); // Compound indexes defined on schema
 
 ## Branching
 
-Branching allows you to create alternate timelines for a document:
+Branching allows you to create alternate timelines for a document, similar to Git branches.
+
+### Creating Branches
+
+By default, `createBranch` automatically activates the new branch (like `git checkout -b`):
 
 ```typescript
-// Create a branch for testing price changes
+// Create and switch to a new branch in one call
+const featureBranch = await Product.createBranch(productId, 'feature-x');
+
+// Subsequent saves automatically go to the new branch
+product.price = 19.99;
+await product.save(); // This change is recorded on 'feature-x', not 'main'
+```
+
+### Branch Options
+
+```typescript
+interface CreateBranchOptions {
+  // Whether to activate the branch after creation (default: true)
+  activate?: boolean;
+
+  // Serial number to branch from (default: latest serial on active branch)
+  fromSerial?: number;
+}
+```
+
+### Common Use Cases
+
+```typescript
+// Create a branch for testing (auto-activates)
 const testBranch = await Product.createBranch(productId, 'price-test');
 
-// Switch to the test branch
-await Product.switchBranch(productId, testBranch._id);
+// Create an archived snapshot without switching to it
+const snapshot = await Product.createBranch(productId, 'v1.0-release', {
+  activate: false
+});
 
-// Updates now go to the test branch
-await Product.findByIdAndUpdate(productId, { price: 19.99 });
+// Create a hotfix branch from a specific point in history
+const hotfix = await Product.createBranch(productId, 'hotfix-123', {
+  fromSerial: 5,   // Branch from serial 5
+  activate: true   // And switch to it
+});
 
-// Switch back to main branch - price is still 29.99
-await Product.switchBranch(productId, mainBranchId);
+// Check which branch is currently active
+const active = await Product.getActiveBranch(productId);
+console.log(active.name); // 'hotfix-123'
+
+// List all branches for the document
+const branches = await Product.listBranches(productId);
+// Returns: [{ name: 'main', ... }, { name: 'price-test', ... }, ...]
+
+// Switch back to main branch
+const mainBranch = branches.find(b => b.name === 'main');
+await Product.switchBranch(productId, mainBranch._id);
 ```
+
+### Why Auto-Activate by Default?
+
+The `activate: true` default was chosen because:
+
+1. **Matches user expectations** - When you create a branch, you typically want to work on it
+2. **Follows Git convention** - `git checkout -b` creates and switches in one command
+3. **Reduces boilerplate** - Most callers won't need to make a second API call
+4. **Prevents accidents** - No risk of commits going to the wrong branch
+
+If you need to create a branch without switching to it (e.g., for bookmarks, archived snapshots, or preview branches), use `{ activate: false }`.
 
 ## Schema Types
 
@@ -380,6 +441,20 @@ interface ChronicleConfig {
 }
 ```
 
+### CreateBranchOptions
+
+```typescript
+interface CreateBranchOptions {
+  // Whether to activate the branch after creation (default: true)
+  // When true, subsequent saves will be recorded on the new branch
+  activate?: boolean;
+
+  // Serial number to branch from (default: latest serial on active branch)
+  // Allows creating branches from any point in history
+  fromSerial?: number;
+}
+```
+
 ## Indexes
 
 The plugin creates optimized indexes on chronicle collections:
@@ -422,10 +497,10 @@ For each indexed field in your schema, the plugin creates:
 The following features are planned but not yet fully implemented:
 
 - `findAsOf()` - Point-in-time queries (TODO)
-- `createBranch()` / `switchBranch()` - Branch management (TODO)
 - `getHistory()` - Full document history retrieval (TODO)
 - Query rewriting for `find()` / `findOne()` operations (TODO)
 - `findOneAndUpdate` / `findOneAndDelete` middleware (TODO)
+- Branch merging (TODO)
 
 ## Development
 

@@ -38,7 +38,7 @@ function chroniclePlugin(schema, options = {}) {
     // Add chronicle-specific instance methods
     addInstanceMethods(schema);
     // Add chronicle-specific static methods
-    addStaticMethods(schema);
+    addStaticMethods(schema, chronicleSchema.chronicleOptions);
     // Override middleware for CRUD operations
     addMiddleware(schema, chronicleSchema.chronicleOptions);
 }
@@ -77,26 +77,39 @@ function addInstanceMethods(schema) {
 /**
  * Adds static methods to the model
  */
-function addStaticMethods(schema) {
+function addStaticMethods(schema, options) {
     schema.statics.findAsOf = async function (_filter, _asOf) {
         // Implementation will rehydrate document state at given time
         // TODO: Implement point-in-time query
         return null;
     };
-    schema.statics.createBranch = async function (_docId, _branchName) {
-        // Implementation will create a new branch
-        // TODO: Implement branch creation
-        throw new Error('Not implemented');
+    schema.statics.createBranch = async function (docId, branchName, branchOptions = {}) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.createBranch)(ctx, docId, branchName, branchOptions);
     };
-    schema.statics.switchBranch = async function (_docId, _branchId) {
-        // Implementation will switch active branch
-        // TODO: Implement branch switching
-        throw new Error('Not implemented');
+    schema.statics.switchBranch = async function (docId, branchId) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.switchBranch)(ctx, docId, branchId);
     };
-    schema.statics.listBranches = async function (_docId) {
-        // Implementation will list all branches
-        // TODO: Implement branch listing
-        return [];
+    schema.statics.listBranches = async function (docId) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.listBranches)(ctx, docId);
+    };
+    schema.statics.getActiveBranch = async function (docId) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.getActiveBranch)(ctx, docId);
     };
 }
 /**

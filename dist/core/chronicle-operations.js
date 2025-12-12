@@ -10,6 +10,10 @@ exports.createChronicleChunk = createChronicleChunk;
 exports.shouldWriteFullChunk = shouldWriteFullChunk;
 exports.finalizeChronicleOperation = finalizeChronicleOperation;
 exports.processChroniclesSave = processChroniclesSave;
+exports.createBranch = createBranch;
+exports.switchBranch = switchBranch;
+exports.listBranches = listBranches;
+exports.getActiveBranch = getActiveBranch;
 const mongoose_1 = require("mongoose");
 const delta_1 = require("../utils/delta");
 /**
@@ -338,5 +342,213 @@ async function processChroniclesSave(ctx, doc, isNew) {
     // Finalize the operation
     await finalizeChronicleOperation(ctx, state.docId);
     return { docId: state.docId, chunkId };
+}
+/**
+ * Creates a new branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchName - Name for the new branch
+ * @param options - Branch creation options
+ * @returns The created branch
+ */
+async function createBranch(ctx, docId, branchName, options = {}) {
+    const { activate = true, fromSerial } = options;
+    const metadataCollectionName = ctx.options.metadataCollectionName ??
+        `${ctx.baseCollectionName}_chronicle_metadata`;
+    const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+    const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+    const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+    const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+    if (!metadataCollection || !branchCollection || !chunksCollection) {
+        throw new Error('Chronicle collections not initialized');
+    }
+    // Get current metadata to find active branch
+    const metadata = await metadataCollection.findOne({ docId });
+    if (!metadata) {
+        throw new Error(`Chronicle metadata not found for document ${docId}`);
+    }
+    const parentBranchId = metadata.activeBranchId;
+    // Determine the serial to branch from
+    let parentSerial;
+    if (fromSerial !== undefined) {
+        // Verify the specified serial exists
+        const chunk = await chunksCollection.findOne({
+            docId,
+            branchId: parentBranchId,
+            serial: fromSerial,
+        });
+        if (!chunk) {
+            throw new Error(`Serial ${fromSerial} not found on current branch`);
+        }
+        parentSerial = fromSerial;
+    }
+    else {
+        // Use the latest serial
+        const latestChunk = await chunksCollection.findOne({ docId, branchId: parentBranchId, isLatest: true }, { projection: { serial: 1 } });
+        if (!latestChunk) {
+            throw new Error('No chunks found for document on current branch');
+        }
+        parentSerial = latestChunk.serial;
+    }
+    // Create the new branch
+    const newBranchId = new mongoose_1.Types.ObjectId();
+    const now = new Date();
+    const branchDoc = {
+        _id: newBranchId,
+        docId,
+        parentBranchId,
+        parentSerial,
+        name: branchName,
+        createdAt: now,
+    };
+    await branchCollection.insertOne(branchDoc);
+    // Rehydrate the document state at the branch point
+    const documentState = await rehydrateDocumentAtSerial(ctx, docId, parentBranchId, parentSerial);
+    if (!documentState) {
+        throw new Error('Failed to rehydrate document state at branch point');
+    }
+    // Create a FULL chunk for the new branch with the state at the branch point
+    await chunksCollection.insertOne({
+        _id: new mongoose_1.Types.ObjectId(),
+        docId,
+        branchId: newBranchId,
+        serial: 1,
+        ccType: 1, // FULL
+        isDeleted: false,
+        isLatest: true,
+        cTime: now,
+        payload: documentState,
+    });
+    // Activate the branch if requested (default: true)
+    if (activate) {
+        await metadataCollection.updateOne({ docId }, { $set: { activeBranchId: newBranchId, updatedAt: now } });
+    }
+    return branchDoc;
+}
+/**
+ * Rehydrates a document at a specific serial number
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID
+ * @param serial - Serial number to rehydrate to
+ */
+async function rehydrateDocumentAtSerial(ctx, docId, branchId, serial) {
+    const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+    if (!chunksCollection) {
+        return undefined;
+    }
+    // Get all chunks up to and including the target serial
+    const chunks = await chunksCollection
+        .find({ docId, branchId, serial: { $lte: serial } })
+        .sort({ serial: 1 })
+        .toArray();
+    if (chunks.length === 0) {
+        return undefined;
+    }
+    // Find the most recent full chunk at or before target serial
+    let fullChunkIndex = -1;
+    for (let i = chunks.length - 1; i >= 0; i--) {
+        if (chunks[i]?.ccType === 1) { // FULL
+            fullChunkIndex = i;
+            break;
+        }
+    }
+    if (fullChunkIndex === -1) {
+        return undefined;
+    }
+    // Start with the full chunk's payload
+    const result = { ...chunks[fullChunkIndex]?.payload };
+    // Apply subsequent deltas up to target serial
+    for (let i = fullChunkIndex + 1; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (chunk?.ccType === 2) { // DELTA
+            const delta = chunk.payload;
+            for (const [key, value] of Object.entries(delta)) {
+                if (value === null) {
+                    // Use undefined assignment to remove the key (avoids delete operator)
+                    result[key] = undefined;
+                }
+                else {
+                    result[key] = value;
+                }
+            }
+        }
+    }
+    // Clean up undefined values
+    for (const key of Object.keys(result)) {
+        if (result[key] === undefined) {
+            const { [key]: _, ...rest } = result;
+            Object.assign(result, rest);
+            // Actually remove the key
+            Reflect.deleteProperty(result, key);
+        }
+    }
+    return result;
+}
+/**
+ * Switches the active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID to switch to
+ */
+async function switchBranch(ctx, docId, branchId) {
+    const metadataCollectionName = ctx.options.metadataCollectionName ??
+        `${ctx.baseCollectionName}_chronicle_metadata`;
+    const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+    const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+    const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+    if (!metadataCollection || !branchCollection) {
+        throw new Error('Chronicle collections not initialized');
+    }
+    // Verify the branch exists and belongs to this document
+    const branch = await branchCollection.findOne({ _id: branchId, docId });
+    if (!branch) {
+        throw new Error(`Branch ${branchId} not found for document ${docId}`);
+    }
+    // Update the active branch
+    const result = await metadataCollection.updateOne({ docId }, { $set: { activeBranchId: branchId, updatedAt: new Date() } });
+    if (result.matchedCount === 0) {
+        throw new Error(`Chronicle metadata not found for document ${docId}`);
+    }
+}
+/**
+ * Lists all branches for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns Array of branches
+ */
+async function listBranches(ctx, docId) {
+    const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+    const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+    if (!branchCollection) {
+        throw new Error('Chronicle collections not initialized');
+    }
+    const branches = await branchCollection
+        .find({ docId })
+        .sort({ createdAt: 1 })
+        .toArray();
+    return branches;
+}
+/**
+ * Gets the currently active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns The active branch or null if not found
+ */
+async function getActiveBranch(ctx, docId) {
+    const metadataCollectionName = ctx.options.metadataCollectionName ??
+        `${ctx.baseCollectionName}_chronicle_metadata`;
+    const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+    const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+    const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+    if (!metadataCollection || !branchCollection) {
+        return null;
+    }
+    const metadata = await metadataCollection.findOne({ docId });
+    if (!metadata) {
+        return null;
+    }
+    const branch = await branchCollection.findOne({ _id: metadata.activeBranchId });
+    return branch;
 }
 //# sourceMappingURL=chronicle-operations.js.map

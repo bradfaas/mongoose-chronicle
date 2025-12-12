@@ -166,6 +166,23 @@ export interface ChronicleQueryOptions {
 }
 
 /**
+ * Options for creating a new branch
+ */
+export interface CreateBranchOptions {
+  /**
+   * Whether to activate the branch after creation.
+   * When true, subsequent saves will be recorded on the new branch.
+   * Defaults to true (matches Git's checkout -b behavior).
+   */
+  activate?: boolean;
+  /**
+   * Serial number to branch from.
+   * If not specified, branches from the latest serial on the active branch.
+   */
+  fromSerial?: number;
+}
+
+/**
  * Extended document type with chronicle methods
  */
 export interface ChronicleDocument extends Document {
@@ -183,8 +200,11 @@ export interface ChronicleDocument extends Document {
 export interface ChronicleModel<T extends Document> {
   /** Find document as it existed at a specific point in time */
   findAsOf(filter: Record<string, unknown>, asOf: Date): Promise<T | null>;
-  /** Create a new branch from a document's current state */
-  createBranch(docId: Types.ObjectId, branchName: string): Promise<ChronicleBranch>;
+  /**
+   * Create a new branch from a document's current state.
+   * By default, activates the branch so subsequent saves go to the new branch.
+   */
+  createBranch(docId: Types.ObjectId, branchName: string, options?: CreateBranchOptions): Promise<ChronicleBranch>;
   /** Switch to a different branch */
   switchBranch(docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
   /** Get all branches for a document */

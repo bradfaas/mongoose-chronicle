@@ -1,4 +1,4 @@
-import { Schema, Types, Connection, Document } from 'mongoose';
+import type { Types, Schema, Connection, Document } from 'mongoose';
 import type {
   ChroniclePluginOptions,
   ChronicleChunk,
@@ -16,9 +16,14 @@ import {
 } from '../utils/schema-analyzer';
 import {
   processChroniclesSave,
+  createBranch as createBranchOp,
+  switchBranch as switchBranchOp,
+  listBranches as listBranchesOp,
+  getActiveBranch as getActiveBranchOp,
   type ChronicleContext,
   ChronicleUniqueConstraintError,
 } from './chronicle-operations';
+import type { CreateBranchOptions } from '../types';
 
 const PLUGIN_VERSION = '1.0.0';
 const DEFAULT_FULL_CHUNK_INTERVAL = 10;
@@ -77,7 +82,7 @@ export function chroniclePlugin(
   addInstanceMethods(schema);
 
   // Add chronicle-specific static methods
-  addStaticMethods(schema);
+  addStaticMethods(schema, chronicleSchema.chronicleOptions);
 
   // Override middleware for CRUD operations
   addMiddleware(schema, chronicleSchema.chronicleOptions);
@@ -123,7 +128,7 @@ function addInstanceMethods(schema: Schema): void {
 /**
  * Adds static methods to the model
  */
-function addStaticMethods(schema: Schema): void {
+function addStaticMethods(schema: Schema, options: ChroniclePluginOptions): void {
   schema.statics.findAsOf = async function(
     _filter: Record<string, unknown>,
     _asOf: Date
@@ -134,29 +139,46 @@ function addStaticMethods(schema: Schema): void {
   };
 
   schema.statics.createBranch = async function(
-    _docId: Types.ObjectId,
-    _branchName: string
+    docId: Types.ObjectId,
+    branchName: string,
+    branchOptions: CreateBranchOptions = {}
   ): Promise<ChronicleBranch> {
-    // Implementation will create a new branch
-    // TODO: Implement branch creation
-    throw new Error('Not implemented');
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return createBranchOp(ctx, docId, branchName, branchOptions);
   };
 
   schema.statics.switchBranch = async function(
-    _docId: Types.ObjectId,
-    _branchId: Types.ObjectId
+    docId: Types.ObjectId,
+    branchId: Types.ObjectId
   ): Promise<void> {
-    // Implementation will switch active branch
-    // TODO: Implement branch switching
-    throw new Error('Not implemented');
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return switchBranchOp(ctx, docId, branchId);
   };
 
   schema.statics.listBranches = async function(
-    _docId: Types.ObjectId
+    docId: Types.ObjectId
   ): Promise<ChronicleBranch[]> {
-    // Implementation will list all branches
-    // TODO: Implement branch listing
-    return [];
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return listBranchesOp(ctx, docId);
+  };
+
+  schema.statics.getActiveBranch = async function(
+    docId: Types.ObjectId
+  ): Promise<ChronicleBranch | null> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return getActiveBranchOp(ctx, docId);
   };
 }
 

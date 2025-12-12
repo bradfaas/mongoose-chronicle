@@ -1,5 +1,5 @@
-import { Types, Connection, Document } from 'mongoose';
-import type { ChroniclePluginOptions, ChunkType } from '../types';
+import { Types, type Connection, type Document } from 'mongoose';
+import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions } from '../types';
 /**
  * Error thrown when a unique constraint violation is detected
  */
@@ -102,4 +102,34 @@ export declare function processChroniclesSave(ctx: ChronicleContext, doc: Docume
     docId: Types.ObjectId;
     chunkId: Types.ObjectId;
 }>;
+/**
+ * Creates a new branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchName - Name for the new branch
+ * @param options - Branch creation options
+ * @returns The created branch
+ */
+export declare function createBranch(ctx: ChronicleContext, docId: Types.ObjectId, branchName: string, options?: CreateBranchOptions): Promise<ChronicleBranch>;
+/**
+ * Switches the active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID to switch to
+ */
+export declare function switchBranch(ctx: ChronicleContext, docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
+/**
+ * Lists all branches for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns Array of branches
+ */
+export declare function listBranches(ctx: ChronicleContext, docId: Types.ObjectId): Promise<ChronicleBranch[]>;
+/**
+ * Gets the currently active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns The active branch or null if not found
+ */
+export declare function getActiveBranch(ctx: ChronicleContext, docId: Types.ObjectId): Promise<ChronicleBranch | null>;
 //# sourceMappingURL=chronicle-operations.d.ts.map

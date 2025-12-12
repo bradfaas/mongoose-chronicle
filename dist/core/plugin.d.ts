@@ -1,4 +1,4 @@
-import { Schema, Connection } from 'mongoose';
+import type { Schema, Connection } from 'mongoose';
 import type { ChroniclePluginOptions } from '../types';
 import { type SchemaIndexAnalysis } from '../utils/schema-analyzer';
 /**
