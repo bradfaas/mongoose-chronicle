@@ -125,6 +125,13 @@ function addStaticMethods(schema, options) {
         const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
         return (0, chronicle_operations_1.chronicleSquash)(ctx, docId, serial, squashOptions);
     };
+    schema.statics.chronicleAsOf = async function (docId, asOf, asOfOptions = {}) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleAsOf)(ctx, docId, asOf, asOfOptions);
+    };
 }
 /**
  * Creates a chronicle context for operations

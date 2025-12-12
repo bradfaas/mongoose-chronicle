@@ -1,5 +1,5 @@
 import { Types, type Connection, type Document } from 'mongoose';
-import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult } from '../types';
+import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult, AsOfOptions, AsOfResult } from '../types';
 /**
  * Error thrown when a unique constraint violation is detected
  */
@@ -154,4 +154,15 @@ export declare function chronicleRevert(ctx: ChronicleContext, docId: Types.Obje
  * @returns Result containing success status, previous counts, and the new state
  */
 export declare function chronicleSquash(ctx: ChronicleContext, docId: Types.ObjectId, serial: number, options: SquashOptions): Promise<SquashResult | SquashDryRunResult>;
+/**
+ * Gets the document state at a specific point in time.
+ * Rehydrates the document from chunks created at or before the given timestamp.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param asOf - The timestamp to query
+ * @param options - Query options (branchId or searchAllBranches)
+ * @returns Result containing found status, state, and metadata
+ */
+export declare function chronicleAsOf(ctx: ChronicleContext, docId: Types.ObjectId, asOf: Date, options?: AsOfOptions): Promise<AsOfResult>;
 //# sourceMappingURL=chronicle-operations.d.ts.map

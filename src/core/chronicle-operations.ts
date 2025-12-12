@@ -9,6 +9,8 @@ import type {
   SquashOptions,
   SquashResult,
   SquashDryRunResult,
+  AsOfOptions,
+  AsOfResult,
 } from '../types';
 import { computeDelta, isDeltaEmpty } from '../utils/delta';
 
@@ -1019,4 +1021,198 @@ export async function chronicleSquash(
     previousBranchCount,
     newState: newBaseState,
   };
+}
+
+/**
+ * Gets the document state at a specific point in time.
+ * Rehydrates the document from chunks created at or before the given timestamp.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param asOf - The timestamp to query
+ * @param options - Query options (branchId or searchAllBranches)
+ * @returns Result containing found status, state, and metadata
+ */
+export async function chronicleAsOf(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  asOf: Date,
+  options: AsOfOptions = {}
+): Promise<AsOfResult> {
+  const { branchId: optionBranchId, searchAllBranches = false } = options;
+
+  // Validate mutually exclusive options
+  if (optionBranchId && searchAllBranches) {
+    throw new Error('branchId and searchAllBranches are mutually exclusive');
+  }
+
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+  const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!metadataCollection || !branchCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  if (searchAllBranches) {
+    // Cross-branch search: find the branch with the most recent chunk at or before asOf
+    return chronicleAsOfAllBranches(ctx, docId, asOf, chunksCollection, branchCollection);
+  }
+
+  // Single branch query
+  let branchId: Types.ObjectId;
+  if (optionBranchId) {
+    branchId = optionBranchId;
+  } else {
+    // Use active branch
+    const metadata = await metadataCollection.findOne({ docId });
+    if (!metadata) {
+      return { found: false };
+    }
+    branchId = metadata.activeBranchId as Types.ObjectId;
+  }
+
+  return chronicleAsOfSingleBranch(ctx, docId, asOf, branchId, chunksCollection);
+}
+
+/**
+ * Helper function for single-branch asOf query
+ */
+async function chronicleAsOfSingleBranch(
+  _ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  asOf: Date,
+  branchId: Types.ObjectId,
+  chunksCollection: ReturnType<NonNullable<Connection['db']>['collection']>
+): Promise<AsOfResult> {
+  // Build query for chunks at or before the asOf timestamp
+  const query = {
+    docId,
+    branchId,
+    cTime: { $lte: asOf },
+  };
+
+  // Get chunks ordered by serial ascending
+  const chunks = await chunksCollection
+    .find(query)
+    .sort({ serial: 1 })
+    .toArray();
+
+  if (chunks.length === 0) {
+    return { found: false };
+  }
+
+  // Find the most recent FULL chunk
+  let fullChunkIndex = -1;
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    if (chunks[i]?.ccType === 1) { // FULL
+      fullChunkIndex = i;
+      break;
+    }
+  }
+
+  if (fullChunkIndex === -1) {
+    // No full chunk found before asOf
+    return { found: false };
+  }
+
+  // Start with the full chunk's payload
+  const state: Record<string, unknown> = { ...(chunks[fullChunkIndex]?.payload as Record<string, unknown>) };
+
+  // Apply subsequent deltas
+  for (let i = fullChunkIndex + 1; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    if (chunk?.ccType === 2) { // DELTA
+      const delta = chunk.payload as Record<string, unknown>;
+      for (const [key, value] of Object.entries(delta)) {
+        if (value === null) {
+          delete state[key];
+        } else {
+          state[key] = value;
+        }
+      }
+    }
+  }
+
+  // Get the last chunk for metadata (most recent chunk at or before asOf)
+  const lastChunk = chunks[chunks.length - 1];
+
+  return {
+    found: true,
+    state,
+    serial: lastChunk?.serial as number,
+    branchId,
+    chunkTimestamp: lastChunk?.cTime as Date,
+  };
+}
+
+/**
+ * Helper function for cross-branch asOf query (searchAllBranches: true)
+ */
+async function chronicleAsOfAllBranches(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  asOf: Date,
+  chunksCollection: ReturnType<NonNullable<Connection['db']>['collection']>,
+  branchCollection: ReturnType<NonNullable<Connection['db']>['collection']>
+): Promise<AsOfResult> {
+  // Get all branches for this document
+  const branches = await branchCollection.find({ docId }).toArray();
+
+  if (branches.length === 0) {
+    return { found: false };
+  }
+
+  // For each branch, find the most recent chunk at or before asOf
+  interface BranchCandidate {
+    branchId: Types.ObjectId;
+    latestCTime: Date;
+  }
+
+  const candidates: BranchCandidate[] = [];
+
+  for (const branch of branches) {
+    const latestChunk = await chunksCollection.findOne(
+      {
+        docId,
+        branchId: branch._id,
+        cTime: { $lte: asOf },
+      },
+      {
+        sort: { cTime: -1 },
+        projection: { cTime: 1 },
+      }
+    );
+
+    if (latestChunk) {
+      candidates.push({
+        branchId: branch._id as Types.ObjectId,
+        latestCTime: latestChunk.cTime as Date,
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    return { found: false };
+  }
+
+  // Find the branch with the most recent chunk
+  let best = candidates[0];
+  for (let i = 1; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    if (candidate && best && candidate.latestCTime > best.latestCTime) {
+      best = candidate;
+    }
+  }
+
+  if (!best) {
+    return { found: false };
+  }
+
+  // Rehydrate from the winning branch
+  return chronicleAsOfSingleBranch(ctx, docId, asOf, best.branchId, chunksCollection);
 }

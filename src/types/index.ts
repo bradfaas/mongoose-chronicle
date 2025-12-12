@@ -260,6 +260,55 @@ export interface SquashDryRunResult {
 }
 
 /**
+ * Options for point-in-time document rehydration
+ */
+export interface AsOfOptions {
+  /**
+   * Specific branch to query. If not provided, uses the active branch.
+   */
+  branchId?: Types.ObjectId;
+
+  /**
+   * If true, searches across all branches and returns the state from
+   * whichever branch had the most recent chunk at or before the timestamp.
+   * Mutually exclusive with branchId.
+   * Default: false
+   */
+  searchAllBranches?: boolean;
+}
+
+/**
+ * Result of a point-in-time document rehydration
+ */
+export interface AsOfResult {
+  /**
+   * Whether a valid state was found at the given timestamp
+   */
+  found: boolean;
+
+  /**
+   * The rehydrated document state at the given timestamp.
+   * Undefined if found is false.
+   */
+  state?: Record<string, unknown>;
+
+  /**
+   * The serial number of the chunk that was current at the given timestamp
+   */
+  serial?: number;
+
+  /**
+   * The branch ID from which the state was retrieved
+   */
+  branchId?: Types.ObjectId;
+
+  /**
+   * The exact timestamp of the chunk used (may be earlier than requested asOf)
+   */
+  chunkTimestamp?: Date;
+}
+
+/**
  * Extended document type with chronicle methods
  */
 export interface ChronicleDocument extends Document {
@@ -298,4 +347,9 @@ export interface ChronicleModel<T extends Document> {
    * This is a destructive, irreversible operation that removes all branches and history.
    */
   chronicleSquash(docId: Types.ObjectId, serial: number, options: SquashOptions): Promise<SquashResult | SquashDryRunResult>;
+  /**
+   * Get the document state at a specific point in time.
+   * Rehydrates the document from chunks created at or before the given timestamp.
+   */
+  chronicleAsOf(docId: Types.ObjectId, asOf: Date, options?: AsOfOptions): Promise<AsOfResult>;
 }

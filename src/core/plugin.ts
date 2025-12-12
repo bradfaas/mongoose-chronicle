@@ -22,6 +22,7 @@ import {
   getActiveBranch as getActiveBranchOp,
   chronicleRevert as chronicleRevertOp,
   chronicleSquash as chronicleSquashOp,
+  chronicleAsOf as chronicleAsOfOp,
   type ChronicleContext,
   ChronicleUniqueConstraintError,
 } from './chronicle-operations';
@@ -32,6 +33,8 @@ import type {
   SquashOptions,
   SquashResult,
   SquashDryRunResult,
+  AsOfOptions,
+  AsOfResult,
 } from '../types';
 
 const PLUGIN_VERSION = '1.0.0';
@@ -212,6 +215,18 @@ function addStaticMethods(schema: Schema, options: ChroniclePluginOptions): void
     const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
     const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
     return chronicleSquashOp(ctx, docId, serial, squashOptions);
+  };
+
+  schema.statics.chronicleAsOf = async function(
+    docId: Types.ObjectId,
+    asOf: Date,
+    asOfOptions: AsOfOptions = {}
+  ): Promise<AsOfResult> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleAsOfOp(ctx, docId, asOf, asOfOptions);
   };
 }
 

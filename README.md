@@ -270,6 +270,16 @@ const revertResult = await Product.chronicleRevert(docId, 5);
 // Revert on a specific branch without rehydrating
 await Product.chronicleRevert(docId, 3, { branchId: someBranchId, rehydrate: false });
 
+// Get document state at a specific point in time
+const historicalState = await Product.chronicleAsOf(docId, new Date('2024-06-15'));
+// Returns: { found: true, state: {...}, serial: 5, branchId: '...', chunkTimestamp: Date }
+
+// Query a specific branch at a point in time
+const branchState = await Product.chronicleAsOf(docId, targetDate, { branchId: featureBranchId });
+
+// Search across all branches for state at a timestamp
+const crossBranchState = await Product.chronicleAsOf(docId, auditDate, { searchAllBranches: true });
+
 // Preview what squash would delete (dry run)
 const preview = await Product.chronicleSquash(docId, 5, { dryRun: true, confirm: false });
 // Returns: { wouldDelete: { chunks: 47, branches: 5 }, newBaseState: {...} }
@@ -479,6 +489,125 @@ await Product.chronicleSquash(productId, 3, {
 | **Reversible** | Partially (deleted chunks are gone) | No |
 | **Use case** | Undo recent changes | Clean slate / storage cleanup |
 
+## Point-in-Time Queries (`chronicleAsOf`)
+
+Query the state of a document at any arbitrary point in time. This is essential for auditing, debugging, compliance, and temporal data analysis.
+
+### Basic Usage
+
+```typescript
+// Get document state as of yesterday
+const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+const result = await Product.chronicleAsOf(productId, yesterday);
+
+if (result.found) {
+  console.log('State at', result.chunkTimestamp, ':', result.state);
+  console.log('Was at serial', result.serial);
+} else {
+  console.log('No data exists for this document at that time');
+}
+```
+
+### Query Options
+
+```typescript
+interface AsOfOptions {
+  // Specific branch to query (default: active branch)
+  branchId?: ObjectId;
+
+  // Search across all branches for state at timestamp
+  // Returns state from branch with most recent chunk at or before asOf
+  // Mutually exclusive with branchId
+  searchAllBranches?: boolean;
+}
+```
+
+### Result Interface
+
+```typescript
+interface AsOfResult {
+  // Whether a valid state was found
+  found: boolean;
+
+  // The rehydrated document state (undefined if found is false)
+  state?: Record<string, unknown>;
+
+  // Serial number of the chunk that was current at the timestamp
+  serial?: number;
+
+  // Branch ID from which the state was retrieved
+  branchId?: ObjectId;
+
+  // Exact timestamp of the chunk used (may be earlier than requested asOf)
+  chunkTimestamp?: Date;
+}
+```
+
+### Use Cases
+
+**Audit & Compliance** - Retrieve exact state at audit points:
+```typescript
+const auditDate = new Date('2024-12-31T23:59:59Z');
+const stateAtYearEnd = await Invoice.chronicleAsOf(invoiceId, auditDate);
+```
+
+**Debugging / Incident Response** - Investigate document state when issues occurred:
+```typescript
+const incidentTime = new Date('2024-03-15T14:32:00Z');
+const stateAtIncident = await Order.chronicleAsOf(orderId, incidentTime);
+```
+
+**Historical Reporting** - Generate reports based on historical data:
+```typescript
+const reportDate = new Date('2024-06-30');
+const products = await getProductIds();
+const historicalStates = await Promise.all(
+  products.map(id => Product.chronicleAsOf(id, reportDate))
+);
+```
+
+**Diff Between Two Points in Time** - Compare document state:
+```typescript
+const before = await Product.chronicleAsOf(id, startDate);
+const after = await Product.chronicleAsOf(id, endDate);
+// Use your preferred diff library to compare before.state and after.state
+```
+
+### Specific Branch Query
+
+```typescript
+// Get state from a specific branch at a specific time
+const result = await Product.chronicleAsOf(productId, targetDate, {
+  branchId: featureBranchId
+});
+```
+
+### Cross-Branch Search
+
+When you need to find state across any branch at a given time:
+
+```typescript
+// Search all branches and return state from whichever had the most recent chunk
+const result = await Product.chronicleAsOf(productId, auditDate, {
+  searchAllBranches: true
+});
+
+if (result.found) {
+  console.log('Found on branch:', result.branchId);
+}
+```
+
+### Edge Cases
+
+| Scenario | Behavior |
+|----------|----------|
+| No chunks exist before `asOf` | Returns `{ found: false }` |
+| Document didn't exist at `asOf` | Returns `{ found: false }` |
+| Branch didn't exist at `asOf` | Returns `{ found: false }` |
+| `asOf` is in the future | Returns current/latest state |
+| `asOf` exactly matches a chunk timestamp | Includes that chunk in rehydration |
+| `branchId` and `searchAllBranches` both provided | Throws error (mutually exclusive) |
+
 ## Schema Types
 
 ### ChronicleChunk
@@ -624,6 +753,40 @@ interface SquashDryRunResult {
 }
 ```
 
+### AsOfOptions
+
+```typescript
+interface AsOfOptions {
+  // Specific branch to query (default: active branch)
+  branchId?: ObjectId;
+
+  // Search all branches and return state from the one with most recent chunk
+  // Mutually exclusive with branchId
+  searchAllBranches?: boolean;
+}
+```
+
+### AsOfResult
+
+```typescript
+interface AsOfResult {
+  // Whether a valid state was found at the timestamp
+  found: boolean;
+
+  // The rehydrated document state (undefined if found is false)
+  state?: Record<string, unknown>;
+
+  // Serial number of the chunk current at the timestamp
+  serial?: number;
+
+  // Branch ID from which the state was retrieved
+  branchId?: ObjectId;
+
+  // Exact timestamp of the chunk used (may be earlier than asOf)
+  chunkTimestamp?: Date;
+}
+```
+
 ## Indexes
 
 The plugin creates optimized indexes on chronicle collections:
@@ -669,11 +832,13 @@ For each indexed field in your schema, the plugin creates:
 
 The following features are planned but not yet fully implemented:
 
-- `findAsOf()` - Point-in-time queries (TODO)
+- `findAsOf()` - Multi-document point-in-time queries with filters (TODO)
 - `getHistory()` - Full document history retrieval (TODO)
 - Query rewriting for `find()` / `findOne()` operations (TODO)
 - `findOneAndUpdate` / `findOneAndDelete` middleware (TODO)
 - Branch merging (TODO)
+
+**Note:** Single-document point-in-time queries are available via `chronicleAsOf()`.
 
 ## Development
 
