@@ -111,6 +111,20 @@ function addStaticMethods(schema, options) {
         const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
         return (0, chronicle_operations_1.getActiveBranch)(ctx, docId);
     };
+    schema.statics.chronicleRevert = async function (docId, serial, revertOptions = {}) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleRevert)(ctx, docId, serial, revertOptions);
+    };
+    schema.statics.chronicleSquash = async function (docId, serial, squashOptions) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleSquash)(ctx, docId, serial, squashOptions);
+    };
 }
 /**
  * Creates a chronicle context for operations

@@ -1,5 +1,15 @@
 import { Types, type Connection, type Document } from 'mongoose';
-import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions } from '../types';
+import type {
+  ChroniclePluginOptions,
+  ChunkType,
+  ChronicleBranch,
+  CreateBranchOptions,
+  RevertOptions,
+  RevertResult,
+  SquashOptions,
+  SquashResult,
+  SquashDryRunResult,
+} from '../types';
 import { computeDelta, isDeltaEmpty } from '../utils/delta';
 
 /**
@@ -760,4 +770,253 @@ export async function getActiveBranch(
 
   const branch = await branchCollection.findOne({ _id: metadata.activeBranchId });
   return branch as unknown as ChronicleBranch | null;
+}
+
+/**
+ * Reverts a branch's history to a specific serial, removing all chunks newer than the target.
+ * This operation only affects the specified branch and does not touch other branches.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to revert to (becomes the new "latest")
+ * @param options - Revert options
+ * @returns Result containing success status, counts, and optionally the rehydrated state
+ */
+export async function chronicleRevert(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  serial: number,
+  options: RevertOptions = {}
+): Promise<RevertResult> {
+  const { rehydrate = true } = options;
+
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+  const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!metadataCollection || !branchCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Determine target branch
+  let branchId: Types.ObjectId;
+  if (options.branchId) {
+    branchId = options.branchId;
+  } else {
+    const metadata = await metadataCollection.findOne({ docId });
+    if (!metadata) {
+      throw new Error(`Chronicle metadata not found for document ${docId}`);
+    }
+    branchId = metadata.activeBranchId as Types.ObjectId;
+  }
+
+  // Validate the target serial exists
+  const targetChunk = await chunksCollection.findOne({
+    docId,
+    branchId,
+    serial,
+  });
+
+  if (!targetChunk) {
+    throw new Error(`Serial ${serial} not found on branch ${branchId}`);
+  }
+
+  // Check if target is already latest (no-op)
+  const latestChunk = await chunksCollection.findOne({
+    docId,
+    branchId,
+    isLatest: true,
+  });
+
+  if (latestChunk && latestChunk.serial === serial) {
+    // Target is already latest, return early
+    let state: Record<string, unknown> | undefined;
+    if (rehydrate) {
+      state = await rehydrateDocumentAtSerial(ctx, docId, branchId, serial);
+    }
+    return {
+      success: true,
+      revertedToSerial: serial,
+      chunksRemoved: 0,
+      branchesUpdated: 0,
+      state,
+    };
+  }
+
+  // Delete all chunks with serial > targetSerial on this branch
+  const deleteResult = await chunksCollection.deleteMany({
+    docId,
+    branchId,
+    serial: { $gt: serial },
+  });
+
+  const chunksRemoved = deleteResult.deletedCount;
+
+  // Update the target chunk to set isLatest: true
+  await chunksCollection.updateOne(
+    { docId, branchId, serial },
+    { $set: { isLatest: true } }
+  );
+
+  // Update orphaned branches: branches where parentBranchId === branchId AND parentSerial > serial
+  const branchUpdateResult = await branchCollection.updateMany(
+    {
+      docId,
+      parentBranchId: branchId,
+      parentSerial: { $gt: serial },
+    },
+    { $set: { parentSerial: serial } }
+  );
+
+  const branchesUpdated = branchUpdateResult.modifiedCount;
+
+  // Rehydrate if requested
+  let state: Record<string, unknown> | undefined;
+  if (rehydrate) {
+    state = await rehydrateDocumentAtSerial(ctx, docId, branchId, serial);
+  }
+
+  return {
+    success: true,
+    revertedToSerial: serial,
+    chunksRemoved,
+    branchesUpdated,
+    state,
+  };
+}
+
+/**
+ * Squashes all chronicle history into a single FULL chunk representing a chosen point in time.
+ * This is a destructive, irreversible operation that removes all branches and history.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to use as the new base state
+ * @param options - Squash options (confirm must be true to execute)
+ * @returns Result containing success status, previous counts, and the new state
+ */
+export async function chronicleSquash(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  serial: number,
+  options: SquashOptions
+): Promise<SquashResult | SquashDryRunResult> {
+  const { confirm, dryRun = false } = options;
+
+  // Safety check - require explicit confirmation unless dry run
+  if (!dryRun && confirm !== true) {
+    throw new Error('Squash requires explicit confirmation. Set options.confirm = true to execute.');
+  }
+
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+  const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!metadataCollection || !branchCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Determine target branch
+  let branchId: Types.ObjectId;
+  if (options.branchId) {
+    branchId = options.branchId;
+  } else {
+    const metadata = await metadataCollection.findOne({ docId });
+    if (!metadata) {
+      throw new Error(`Chronicle metadata not found for document ${docId}`);
+    }
+    branchId = metadata.activeBranchId as Types.ObjectId;
+  }
+
+  // Validate the target serial exists
+  const targetChunk = await chunksCollection.findOne({
+    docId,
+    branchId,
+    serial,
+  });
+
+  if (!targetChunk) {
+    throw new Error(`Serial ${serial} not found on branch ${branchId}`);
+  }
+
+  // Count existing chunks and branches
+  const previousChunkCount = await chunksCollection.countDocuments({ docId });
+  const previousBranchCount = await branchCollection.countDocuments({ docId });
+
+  // Rehydrate the document state at the target serial
+  const newBaseState = await rehydrateDocumentAtSerial(ctx, docId, branchId, serial);
+
+  if (!newBaseState) {
+    throw new Error('Failed to rehydrate document state at specified serial');
+  }
+
+  // If dry run, return preview without making changes
+  if (dryRun) {
+    return {
+      wouldDelete: {
+        chunks: previousChunkCount,
+        branches: previousBranchCount - 1, // All except the new main
+      },
+      newBaseState,
+    };
+  }
+
+  // Delete ALL chunks for this document
+  await chunksCollection.deleteMany({ docId });
+
+  // Delete ALL branches for this document
+  await branchCollection.deleteMany({ docId });
+
+  // Create new main branch
+  const newBranchId = new Types.ObjectId();
+  const now = new Date();
+
+  await branchCollection.insertOne({
+    _id: newBranchId,
+    docId,
+    parentBranchId: null,
+    parentSerial: null,
+    name: 'main',
+    createdAt: now,
+  });
+
+  // Create a new FULL chunk with serial 1
+  await chunksCollection.insertOne({
+    _id: new Types.ObjectId(),
+    docId,
+    branchId: newBranchId,
+    serial: 1,
+    ccType: 1, // FULL
+    isDeleted: false,
+    isLatest: true,
+    cTime: now,
+    payload: newBaseState,
+  });
+
+  // Update metadata to point to new main branch
+  await metadataCollection.updateOne(
+    { docId },
+    {
+      $set: {
+        activeBranchId: newBranchId,
+        metadataStatus: 'active',
+        updatedAt: now,
+      },
+    }
+  );
+
+  return {
+    success: true,
+    previousChunkCount,
+    previousBranchCount,
+    newState: newBaseState,
+  };
 }

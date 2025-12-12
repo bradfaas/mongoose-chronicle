@@ -20,10 +20,19 @@ import {
   switchBranch as switchBranchOp,
   listBranches as listBranchesOp,
   getActiveBranch as getActiveBranchOp,
+  chronicleRevert as chronicleRevertOp,
+  chronicleSquash as chronicleSquashOp,
   type ChronicleContext,
   ChronicleUniqueConstraintError,
 } from './chronicle-operations';
-import type { CreateBranchOptions } from '../types';
+import type {
+  CreateBranchOptions,
+  RevertOptions,
+  RevertResult,
+  SquashOptions,
+  SquashResult,
+  SquashDryRunResult,
+} from '../types';
 
 const PLUGIN_VERSION = '1.0.0';
 const DEFAULT_FULL_CHUNK_INTERVAL = 10;
@@ -179,6 +188,30 @@ function addStaticMethods(schema: Schema, options: ChroniclePluginOptions): void
     const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
     const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
     return getActiveBranchOp(ctx, docId);
+  };
+
+  schema.statics.chronicleRevert = async function(
+    docId: Types.ObjectId,
+    serial: number,
+    revertOptions: RevertOptions = {}
+  ): Promise<RevertResult> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleRevertOp(ctx, docId, serial, revertOptions);
+  };
+
+  schema.statics.chronicleSquash = async function(
+    docId: Types.ObjectId,
+    serial: number,
+    squashOptions: SquashOptions
+  ): Promise<SquashResult | SquashDryRunResult> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleSquashOp(ctx, docId, serial, squashOptions);
   };
 }
 

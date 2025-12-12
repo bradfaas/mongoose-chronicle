@@ -183,6 +183,83 @@ export interface CreateBranchOptions {
 }
 
 /**
+ * Options for reverting chronicle history
+ */
+export interface RevertOptions {
+  /**
+   * Target branch to revert. Defaults to active branch.
+   */
+  branchId?: Types.ObjectId;
+  /**
+   * If true, update the document's current state to match the reverted state.
+   * Defaults to true.
+   */
+  rehydrate?: boolean;
+}
+
+/**
+ * Result of a chronicle revert operation
+ */
+export interface RevertResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+  /** The serial number that is now the latest */
+  revertedToSerial: number;
+  /** Number of chunks that were removed */
+  chunksRemoved: number;
+  /** Number of branches whose parentSerial was updated */
+  branchesUpdated: number;
+  /** The rehydrated document state (if rehydrate was true) */
+  state?: Record<string, unknown>;
+}
+
+/**
+ * Options for squashing chronicle history
+ */
+export interface SquashOptions {
+  /**
+   * Which branch the target serial is on. Defaults to active branch.
+   */
+  branchId?: Types.ObjectId;
+  /**
+   * Safety flag - must be true to execute the squash.
+   * This is a destructive, irreversible operation.
+   */
+  confirm: boolean;
+  /**
+   * If true, preview what would be deleted without executing.
+   */
+  dryRun?: boolean;
+}
+
+/**
+ * Result of a chronicle squash operation
+ */
+export interface SquashResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+  /** Number of chunks that existed before squash */
+  previousChunkCount: number;
+  /** Number of branches that existed before squash */
+  previousBranchCount: number;
+  /** The new base state after squash */
+  newState: Record<string, unknown>;
+}
+
+/**
+ * Result of a squash dry run
+ */
+export interface SquashDryRunResult {
+  /** Preview of what would be deleted */
+  wouldDelete: {
+    chunks: number;
+    branches: number;
+  };
+  /** The state that would become the new base */
+  newBaseState: Record<string, unknown>;
+}
+
+/**
  * Extended document type with chronicle methods
  */
 export interface ChronicleDocument extends Document {
@@ -209,4 +286,16 @@ export interface ChronicleModel<T extends Document> {
   switchBranch(docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
   /** Get all branches for a document */
   listBranches(docId: Types.ObjectId): Promise<ChronicleBranch[]>;
+  /** Get the currently active branch for a document */
+  getActiveBranch(docId: Types.ObjectId): Promise<ChronicleBranch | null>;
+  /**
+   * Revert a branch's history to a specific serial, removing newer chunks.
+   * Does not affect other branches.
+   */
+  chronicleRevert(docId: Types.ObjectId, serial: number, options?: RevertOptions): Promise<RevertResult>;
+  /**
+   * Squash all chronicle history into a single FULL chunk.
+   * This is a destructive, irreversible operation that removes all branches and history.
+   */
+  chronicleSquash(docId: Types.ObjectId, serial: number, options: SquashOptions): Promise<SquashResult | SquashDryRunResult>;
 }

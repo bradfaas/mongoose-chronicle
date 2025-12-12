@@ -1,5 +1,5 @@
 import { Types, type Connection, type Document } from 'mongoose';
-import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions } from '../types';
+import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult } from '../types';
 /**
  * Error thrown when a unique constraint violation is detected
  */
@@ -132,4 +132,26 @@ export declare function listBranches(ctx: ChronicleContext, docId: Types.ObjectI
  * @returns The active branch or null if not found
  */
 export declare function getActiveBranch(ctx: ChronicleContext, docId: Types.ObjectId): Promise<ChronicleBranch | null>;
+/**
+ * Reverts a branch's history to a specific serial, removing all chunks newer than the target.
+ * This operation only affects the specified branch and does not touch other branches.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to revert to (becomes the new "latest")
+ * @param options - Revert options
+ * @returns Result containing success status, counts, and optionally the rehydrated state
+ */
+export declare function chronicleRevert(ctx: ChronicleContext, docId: Types.ObjectId, serial: number, options?: RevertOptions): Promise<RevertResult>;
+/**
+ * Squashes all chronicle history into a single FULL chunk representing a chosen point in time.
+ * This is a destructive, irreversible operation that removes all branches and history.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to use as the new base state
+ * @param options - Squash options (confirm must be true to execute)
+ * @returns Result containing success status, previous counts, and the new state
+ */
+export declare function chronicleSquash(ctx: ChronicleContext, docId: Types.ObjectId, serial: number, options: SquashOptions): Promise<SquashResult | SquashDryRunResult>;
 //# sourceMappingURL=chronicle-operations.d.ts.map

@@ -262,6 +262,21 @@ const branches = await Product.listBranches(docId);
 
 // Get the currently active branch for a document
 const activeBranch = await Product.getActiveBranch(docId);
+
+// Revert a branch to a specific serial (undo changes)
+const revertResult = await Product.chronicleRevert(docId, 5);
+// Returns: { success: true, revertedToSerial: 5, chunksRemoved: 3, state: {...} }
+
+// Revert on a specific branch without rehydrating
+await Product.chronicleRevert(docId, 3, { branchId: someBranchId, rehydrate: false });
+
+// Preview what squash would delete (dry run)
+const preview = await Product.chronicleSquash(docId, 5, { dryRun: true, confirm: false });
+// Returns: { wouldDelete: { chunks: 47, branches: 5 }, newBaseState: {...} }
+
+// Squash all history to a single point (destructive, irreversible)
+const squashResult = await Product.chronicleSquash(docId, 5, { confirm: true });
+// Returns: { success: true, previousChunkCount: 47, previousBranchCount: 5, newState: {...} }
 ```
 
 ### Utility Functions
@@ -368,6 +383,102 @@ The `activate: true` default was chosen because:
 
 If you need to create a branch without switching to it (e.g., for bookmarks, archived snapshots, or preview branches), use `{ activate: false }`.
 
+## History Management
+
+mongoose-chronicle provides two operations for managing chronicle history: **Revert** (undo changes on a branch) and **Squash** (collapse all history to a single point).
+
+### Revert (`chronicleRevert`)
+
+Revert a branch's history to a specific serial, removing all chunks newer than the target. This only affects the specified branch - other branches remain untouched.
+
+```typescript
+// Revert active branch to serial 5
+const result = await Product.chronicleRevert(productId, 5);
+// result: {
+//   success: true,
+//   revertedToSerial: 5,
+//   chunksRemoved: 3,
+//   branchesUpdated: 1,  // Child branches whose parentSerial was updated
+//   state: { /* rehydrated document state */ }
+// }
+
+// Revert a specific branch without rehydrating
+await Product.chronicleRevert(productId, 3, {
+  branchId: featureBranchId,
+  rehydrate: false
+});
+```
+
+**RevertOptions:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `branchId` | ObjectId | active branch | Target branch to revert |
+| `rehydrate` | boolean | `true` | Return the document state after revert |
+
+**Behavior:**
+- Validates target serial exists on the branch
+- Deletes all chunks with `serial > targetSerial`
+- Marks target chunk as `isLatest: true`
+- Updates orphaned child branches (sets their `parentSerial` to target if it was higher)
+- Returns rehydrated state if `rehydrate: true`
+
+### Squash (`chronicleSquash`)
+
+Collapse ALL chronicle history into a single FULL chunk. This is a **destructive, irreversible** operation that removes all branches and history, creating a clean baseline.
+
+```typescript
+// Preview what would be deleted (dry run)
+const preview = await Product.chronicleSquash(productId, 5, {
+  dryRun: true,
+  confirm: false
+});
+// preview: {
+//   wouldDelete: { chunks: 47, branches: 5 },
+//   newBaseState: { /* document state at serial 5 */ }
+// }
+
+// Execute squash (requires explicit confirmation)
+const result = await Product.chronicleSquash(productId, 5, { confirm: true });
+// result: {
+//   success: true,
+//   previousChunkCount: 47,
+//   previousBranchCount: 5,
+//   newState: { /* the new baseline state */ }
+// }
+
+// Squash to a state from a specific branch
+await Product.chronicleSquash(productId, 3, {
+  branchId: featureBranchId,
+  confirm: true
+});
+```
+
+**SquashOptions:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `confirm` | boolean | Yes | Must be `true` to execute (safety measure) |
+| `branchId` | ObjectId | No | Which branch the target serial is on |
+| `dryRun` | boolean | No | Preview without executing |
+
+**Behavior:**
+1. Rehydrates document state at the specified serial
+2. Deletes ALL chunks across ALL branches
+3. Deletes ALL branches
+4. Creates new `main` branch with a single FULL chunk (serial: 1)
+5. Updates metadata to point to the new main branch
+
+### Comparison: Revert vs Squash
+
+| Aspect | `chronicleRevert` | `chronicleSquash` |
+|--------|-------------------|-------------------|
+| **Scope** | Single branch | All branches |
+| **Removes** | Newer chunks only | All chunks except new base |
+| **Preserves** | Older history + other branches | Nothing |
+| **Creates new chunk** | No | Yes (FULL at serial 1) |
+| **Confirmation required** | No | Yes (`confirm: true`) |
+| **Reversible** | Partially (deleted chunks are gone) | No |
+| **Use case** | Undo recent changes | Clean slate / storage cleanup |
+
 ## Schema Types
 
 ### ChronicleChunk
@@ -455,6 +566,64 @@ interface CreateBranchOptions {
 }
 ```
 
+### RevertOptions
+
+```typescript
+interface RevertOptions {
+  // Target branch to revert (default: active branch)
+  branchId?: ObjectId;
+
+  // If true, return the rehydrated document state (default: true)
+  rehydrate?: boolean;
+}
+```
+
+### RevertResult
+
+```typescript
+interface RevertResult {
+  success: boolean;
+  revertedToSerial: number;
+  chunksRemoved: number;
+  branchesUpdated: number;  // Branches whose parentSerial was updated
+  state?: Record<string, unknown>;  // Rehydrated state if rehydrate: true
+}
+```
+
+### SquashOptions
+
+```typescript
+interface SquashOptions {
+  // Which branch the target serial is on (default: active branch)
+  branchId?: ObjectId;
+
+  // Safety flag - must be true to execute (required)
+  confirm: boolean;
+
+  // If true, preview without executing
+  dryRun?: boolean;
+}
+```
+
+### SquashResult
+
+```typescript
+interface SquashResult {
+  success: boolean;
+  previousChunkCount: number;
+  previousBranchCount: number;
+  newState: Record<string, unknown>;
+}
+
+interface SquashDryRunResult {
+  wouldDelete: {
+    chunks: number;
+    branches: number;
+  };
+  newBaseState: Record<string, unknown>;
+}
+```
+
 ## Indexes
 
 The plugin creates optimized indexes on chronicle collections:
@@ -491,6 +660,10 @@ For each indexed field in your schema, the plugin creates:
 5. **Consider unique constraints** - Be aware that unique constraints are enforced per-branch. A value can be unique within a branch but exist in multiple branches.
 
 6. **Monitor collection sizes** - Chronicle collections grow over time. Plan for increased storage requirements.
+
+7. **Use `chronicleSquash` sparingly** - Squash is destructive and irreversible. Always use `dryRun: true` first to preview what will be deleted. Consider using `chronicleRevert` instead if you only need to undo recent changes on a single branch.
+
+8. **Revert preserves branch independence** - When you revert a branch past a child branch's creation point, the child branch remains intact (branches are self-contained with their own FULL chunks). Only the `parentSerial` metadata is updated.
 
 ## Current Limitations
 
