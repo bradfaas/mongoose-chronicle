@@ -177,6 +177,10 @@ interface ChroniclePluginOptions {
 
   // Name of the metadata collection (default: '{collection}_chronicle_metadata')
   metadataCollectionName?: string;
+
+  // Maximum documents deleteMany can affect before throwing error (default: 100)
+  // Use { chronicleForceDeleteMany: true } in query options to bypass
+  deleteManyLimit?: number;
 }
 ```
 
@@ -630,6 +634,181 @@ if (result.found) {
 | `asOf` exactly matches a chunk timestamp | Includes that chunk in rehydration |
 | `branchId` and `searchAllBranches` both provided | Throws error (mutually exclusive) |
 
+## Transparent Soft Delete
+
+mongoose-chronicle provides transparent soft delete functionality that intercepts standard Mongoose delete operations and converts them into chronicle deletion chunks. Documents are marked as deleted but remain in the database with full history preserved.
+
+### How It Works
+
+When you call standard Mongoose delete methods (`findByIdAndDelete`, `findOneAndDelete`, `deleteOne`, `deleteMany`), the plugin:
+
+1. Intercepts the delete operation via middleware
+2. Creates a chronicle deletion chunk with `isDeleted: true`
+3. Sets `__chronicle_deleted: true` on the document
+4. Prevents actual document removal from the collection
+
+Deleted documents are automatically excluded from regular queries but can be accessed using escape hatches.
+
+### Delete Operations
+
+All standard Mongoose delete operations are transparently converted to soft deletes:
+
+```typescript
+// All of these create chronicle deletion chunks instead of removing documents
+await Product.findByIdAndDelete(productId);
+await Product.findOneAndDelete({ sku: 'WIDGET-001' });
+await Product.deleteOne({ _id: productId });
+await Product.deleteMany({ category: 'discontinued' });
+```
+
+### deleteMany Safety Limit
+
+To prevent accidental mass deletions, `deleteMany` throws an error if it would affect more than 100 documents (configurable):
+
+```typescript
+// Throws error if > 100 documents would be affected
+await Product.deleteMany({ category: 'old' });
+// Error: deleteMany would affect 150 documents, exceeding limit of 100. Use { chronicleForceDeleteMany: true } to bypass.
+
+// Bypass the safety limit when intentional
+await Product.deleteMany({ category: 'old' }, { chronicleForceDeleteMany: true });
+
+// Configure a different limit via plugin options
+ProductSchema.plugin(chroniclePlugin, {
+  deleteManyLimit: 50  // Lower limit for this collection
+});
+```
+
+### Query Filtering
+
+Deleted documents are automatically excluded from `find()` and `findOne()` queries:
+
+```typescript
+// Create and delete a document
+const product = new Product({ name: 'Widget' });
+await product.save();
+await Product.findByIdAndDelete(product._id);
+
+// Regular queries exclude deleted documents
+await Product.find({});                    // Returns []
+await Product.findOne({ _id: product._id }); // Returns null
+await Product.countDocuments({});          // Returns 0
+```
+
+### Escape Hatches
+
+To include deleted documents in queries, use either:
+
+**Option 1: Query helper chain method**
+```typescript
+// Include deleted documents using chain method
+const allDocs = await Product.find({}).includeDeleted();
+const doc = await Product.findOne({ _id: productId }).includeDeleted();
+```
+
+**Option 2: Query options**
+```typescript
+// Include deleted documents using query options
+const allDocs = await Product.find({}, null, { includeDeleted: true });
+const doc = await Product.findOne({ _id: productId }, null, { includeDeleted: true });
+```
+
+### Branch Recovery
+
+When you create a branch from a deleted document's history, the document is automatically restored in the main collection:
+
+```typescript
+// Create a document
+const product = new Product({ name: 'Widget', price: 100 });
+await product.save();
+product.price = 150;
+await product.save();
+
+// Delete the document
+await Product.findByIdAndDelete(product._id);
+
+// Document is now soft-deleted
+await Product.findById(product._id); // Returns null
+
+// Create a branch from serial 1 (the original state)
+await Product.createBranch(product._id, 'recovery-branch', { fromSerial: 1 });
+
+// Document is automatically restored with the state at serial 1
+const restored = await Product.findById(product._id);
+console.log(restored.price); // 100 (from serial 1)
+```
+
+### Branch Switch State Sync
+
+When you switch branches, the main collection document is synchronized to reflect the new branch's state:
+
+```typescript
+// Create document and a feature branch
+const product = new Product({ name: 'Widget', value: 1 });
+await product.save();
+
+const featureBranch = await Product.createBranch(product._id, 'feature');
+product.value = 100;
+await product.save(); // Saved on feature branch
+
+// Get main branch ID
+const branches = await Product.listBranches(product._id);
+const mainBranch = branches.find(b => b.name === 'main');
+
+// Switch back to main - document syncs to main branch state
+await Product.switchBranch(product._id, mainBranch._id);
+const mainState = await Product.findById(product._id);
+console.log(mainState.value); // 1 (main branch state)
+
+// Switch to feature - document syncs to feature branch state
+await Product.switchBranch(product._id, featureBranch._id);
+const featureState = await Product.findById(product._id);
+console.log(featureState.value); // 100 (feature branch state)
+```
+
+If you switch to a branch where the document is deleted, the main collection document is marked as `__chronicle_deleted: true`.
+
+### Using chronicleUndelete
+
+The `chronicleUndelete` method also syncs the main collection:
+
+```typescript
+// Soft delete a document
+await Product.findByIdAndDelete(product._id);
+
+// Document is not findable
+await Product.findById(product._id); // Returns null
+
+// Restore the document
+const result = await Product.chronicleUndelete(product._id);
+
+// Document is back and queryable
+const restored = await Product.findById(product._id);
+console.log(restored.name); // 'Widget'
+```
+
+### The `__chronicle_deleted` Field
+
+The plugin adds a `__chronicle_deleted` boolean field to your documents:
+
+- `false` (default): Document is active and included in queries
+- `true`: Document is soft-deleted and excluded from queries
+
+This field is indexed for efficient query filtering. You generally don't need to interact with this field directly - the middleware and query helpers handle it automatically.
+
+### Configuration
+
+```typescript
+interface ChroniclePluginOptions {
+  // ... other options ...
+
+  // Maximum documents deleteMany can affect before throwing error
+  // Use { chronicleForceDeleteMany: true } to bypass
+  // Default: 100
+  deleteManyLimit?: number;
+}
+```
+
 ## Schema Types
 
 ### ChronicleChunk
@@ -856,11 +1035,10 @@ The following features are planned but not yet fully implemented:
 
 - `findAsOf()` - Multi-document point-in-time queries with filters (TODO)
 - `getHistory()` - Full document history retrieval (TODO)
-- Query rewriting for `find()` / `findOne()` operations (TODO)
-- `findOneAndUpdate` / `findOneAndDelete` middleware (TODO)
+- `findOneAndUpdate` middleware (TODO)
 - Branch merging (TODO)
 
-**Note:** Single-document point-in-time queries are available via `chronicleAsOf()`.
+**Note:** Single-document point-in-time queries are available via `chronicleAsOf()`. Delete operations (`findOneAndDelete`, `findByIdAndDelete`, `deleteOne`, `deleteMany`) are fully implemented as transparent soft deletes.
 
 ## Development
 
