@@ -49,6 +49,13 @@ export interface ChroniclePluginOptions {
    * Defaults to '{originalCollectionName}_chronicle_metadata'.
    */
   metadataCollectionName?: string;
+
+  /**
+   * Maximum number of documents that deleteMany can affect before throwing an error.
+   * Use { chronicleForceDeleteMany: true } in query options to bypass.
+   * Defaults to 100.
+   */
+  deleteManyLimit?: number;
 }
 
 /**

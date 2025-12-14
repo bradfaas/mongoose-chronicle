@@ -1,4 +1,4 @@
-import type { Types, Schema, Connection, Document } from 'mongoose';
+import type { Types, Schema, Connection, Document, Query } from 'mongoose';
 import type {
   ChroniclePluginOptions,
   ChronicleChunk,
@@ -99,6 +99,15 @@ export function chroniclePlugin(
   };
 
   chronicleSchema[CHRONICLE_ANALYSIS] = analysis;
+
+  // Add __chronicle_deleted field for transparent soft delete filtering
+  schema.add({
+    __chronicle_deleted: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+  });
 
   // Add chronicle-specific instance methods
   addInstanceMethods(schema);
@@ -337,26 +346,136 @@ function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
     }
   });
 
-  // Pre-find hooks to rehydrate documents
-  // Note: Full query rewriting is not yet implemented
-  // Use the chunks collection directly or chronicle static methods for queries
+  // Pre-find hooks to filter out deleted documents
   schema.pre('find', function() {
-    // TODO: Implement query rewriting for find operations
-    // For now, queries work on raw chronicle data
+    const queryOptions = this.getOptions() as { includeDeleted?: boolean };
+    if (queryOptions.includeDeleted !== true) {
+      this.where('__chronicle_deleted').ne(true);
+    }
   });
 
   schema.pre('findOne', function() {
-    // TODO: Implement query rewriting for findOne operations
+    const queryOptions = this.getOptions() as { includeDeleted?: boolean };
+    if (queryOptions.includeDeleted !== true) {
+      this.where('__chronicle_deleted').ne(true);
+    }
   });
 
   schema.pre('findOneAndUpdate', async function() {
     // TODO: Implement findOneAndUpdate interception
   });
 
+  // Transparent soft delete via findOneAndDelete / findByIdAndDelete
   schema.pre('findOneAndDelete', async function() {
-    // TODO: Implement soft delete via isDeleted flag
-    // For now, use Model.chronicleSoftDelete(docId) directly
+    const filter = this.getFilter();
+    const Model = this.model;
+    const connection = Model.db;
+    const baseCollectionName = Model.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+
+    // Find the document to be deleted (include deleted to get accurate state)
+    const doc = await Model.findOne(filter, null, { includeDeleted: true }).select('_id __chronicle_deleted');
+    if (!doc || doc.__chronicle_deleted === true) {
+      // Nothing to delete or already deleted - make query match nothing
+      this.setQuery({ _id: null });
+      return;
+    }
+
+    // Create deletion chunk via chronicle
+    await chronicleSoftDeleteOp(ctx, doc._id);
+
+    // Mark as deleted in main collection (instead of actually deleting)
+    await Model.updateOne({ _id: doc._id }, { $set: { __chronicle_deleted: true } });
+
+    // Prevent actual deletion by making query match nothing
+    this.setQuery({ _id: null });
   });
+
+  // Transparent soft delete via deleteOne (query middleware)
+  schema.pre('deleteOne', { document: false, query: true }, async function() {
+    const filter = this.getFilter();
+    const Model = this.model;
+    const connection = Model.db;
+    const baseCollectionName = Model.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+
+    // Find the document to be deleted
+    const doc = await Model.findOne(filter, null, { includeDeleted: true }).select('_id __chronicle_deleted');
+    if (!doc || doc.__chronicle_deleted === true) {
+      // Nothing to delete or already deleted
+      this.setQuery({ _id: null });
+      return;
+    }
+
+    // Create deletion chunk via chronicle
+    await chronicleSoftDeleteOp(ctx, doc._id);
+
+    // Mark as deleted in main collection
+    await Model.updateOne({ _id: doc._id }, { $set: { __chronicle_deleted: true } });
+
+    // Prevent actual deletion
+    this.setQuery({ _id: null });
+  });
+
+  // Transparent soft delete via deleteMany with safety limit
+  const DELETE_MANY_LIMIT = options.deleteManyLimit ?? 100;
+
+  schema.pre('deleteMany', async function() {
+    const filter = this.getFilter();
+    const queryOptions = this.getOptions() as { chronicleForceDeleteMany?: boolean };
+    const Model = this.model;
+    const connection = Model.db;
+    const baseCollectionName = Model.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+
+    // Count matching non-deleted documents
+    const count = await Model.countDocuments({ ...filter, __chronicle_deleted: { $ne: true } });
+
+    if (count === 0) {
+      // Nothing to delete
+      this.setQuery({ _id: null });
+      return;
+    }
+
+    // Safety check unless bypassed
+    if (count > DELETE_MANY_LIMIT && queryOptions.chronicleForceDeleteMany !== true) {
+      throw new Error(
+        `deleteMany would affect ${count} documents, exceeding limit of ${DELETE_MANY_LIMIT}. Use { chronicleForceDeleteMany: true } to bypass.`
+      );
+    }
+
+    // Get all matching non-deleted documents
+    const docs = await Model.find({ ...filter, __chronicle_deleted: { $ne: true } }, null, { includeDeleted: true }).select('_id');
+
+    // Soft delete each document
+    for (const doc of docs) {
+      try {
+        await chronicleSoftDeleteOp(ctx, doc._id);
+      } catch (error) {
+        // Skip already-deleted documents
+        if (!(error as Error).message?.includes('already deleted')) {
+          throw error;
+        }
+      }
+    }
+
+    // Mark all as deleted in main collection
+    await Model.updateMany(filter, { $set: { __chronicle_deleted: true } });
+
+    // Prevent actual deletion
+    this.setQuery({ _id: null });
+  });
+
+  // Add query helper for including deleted documents
+  (schema.query as Record<string, unknown>).includeDeleted = function(
+    this: Query<unknown, unknown>
+  ) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.setOptions({ includeDeleted: true } as any);
+  };
 
   // Post-find hooks to transform results
   schema.post('find', function(_docs) {

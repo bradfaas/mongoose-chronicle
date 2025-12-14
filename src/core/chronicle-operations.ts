@@ -623,6 +623,26 @@ export async function createBranch(
       { docId },
       { $set: { activeBranchId: newBranchId, updatedAt: now } }
     );
+
+    // Sync main collection: recreate document if missing or soft-deleted
+    const baseCollection = ctx.connection.db?.collection(ctx.baseCollectionName);
+    if (baseCollection) {
+      const mainDoc = await baseCollection.findOne({ _id: docId });
+
+      if (!mainDoc || mainDoc.__chronicle_deleted === true) {
+        // Document missing or soft-deleted - restore it with branch state
+        await baseCollection.updateOne(
+          { _id: docId },
+          {
+            $set: {
+              ...documentState,
+              __chronicle_deleted: false,
+            },
+          },
+          { upsert: true }
+        );
+      }
+    }
   }
 
   return branchDoc;
@@ -738,6 +758,36 @@ export async function switchBranch(
 
   if (result.matchedCount === 0) {
     throw new Error(`Chronicle metadata not found for document ${docId}`);
+  }
+
+  // Sync main collection to reflect new branch's state
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+  const baseCollection = ctx.connection.db?.collection(ctx.baseCollectionName);
+
+  if (chunksCollection && baseCollection) {
+    // Get latest chunk on new branch
+    const latestChunk = await chunksCollection.findOne(
+      { docId, branchId, isLatest: true },
+      { projection: { isDeleted: 1 } }
+    );
+
+    if (latestChunk?.isDeleted) {
+      // New branch is deleted - mark main doc as deleted
+      await baseCollection.updateOne(
+        { _id: docId },
+        { $set: { __chronicle_deleted: true } }
+      );
+    } else {
+      // Rehydrate and sync main collection
+      const state = await rehydrateDocument(ctx, docId, branchId);
+      if (state) {
+        await baseCollection.updateOne(
+          { _id: docId },
+          { $set: { ...state, __chronicle_deleted: false } },
+          { upsert: true }
+        );
+      }
+    }
   }
 }
 
@@ -1416,6 +1466,16 @@ export async function chronicleUndelete(
 
   // Update chronicle_keys to mark as not deleted
   await updateChronicleKeys(ctx, docId, branchId, restoredState, false);
+
+  // Sync main collection - restore document
+  const baseCollection = ctx.connection.db?.collection(ctx.baseCollectionName);
+  if (baseCollection) {
+    await baseCollection.updateOne(
+      { _id: docId },
+      { $set: { ...restoredState, __chronicle_deleted: false } },
+      { upsert: true }
+    );
+  }
 
   return {
     success: true,
