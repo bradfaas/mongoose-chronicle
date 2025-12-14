@@ -1033,12 +1033,10 @@ For each indexed field in your schema, the plugin creates:
 
 The following features are planned but not yet fully implemented:
 
-- `findAsOf()` - Multi-document point-in-time queries with filters (TODO)
-- `getHistory()` - Full document history retrieval (TODO)
-- `findOneAndUpdate` middleware (TODO)
-- Branch merging (TODO)
+- Branch merging - combining changes from one branch into another
+- `updateOne` / `updateMany` middleware - these query-based updates bypass chronicle tracking (use `findOneAndUpdate` or `doc.save()` instead)
 
-**Note:** Single-document point-in-time queries are available via `chronicleAsOf()`. Delete operations (`findOneAndDelete`, `findByIdAndDelete`, `deleteOne`, `deleteMany`) are fully implemented as transparent soft deletes.
+**Note:** All core CRUD operations are implemented. Point-in-time queries are available via `chronicleAsOf()` (single document) and `findAsOf()` (multi-document with filter). Document instance methods (`getHistory()`, `getBranches()`, `createSnapshot()`) are fully implemented.
 
 ## Development
 

@@ -67,29 +67,71 @@ function getChronicleOptions(schema) {
  */
 function addInstanceMethods(schema) {
     schema.methods.getHistory = async function () {
-        // Implementation will query all chunks for this document
-        // TODO: Implement full history retrieval
-        return [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const doc = this;
+        const connection = doc.db ?? doc.constructor?.db;
+        const baseCollectionName = doc.constructor?.collection?.name ?? doc.collection?.name;
+        if (!connection?.db || !baseCollectionName) {
+            throw new Error('Cannot retrieve history: document not associated with a connection');
+        }
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const chunksCollection = connection.db.collection(chunksCollectionName);
+        // Query all chunks for this document, sorted by epoch, branchId, and serial
+        const chunks = await chunksCollection
+            .find({ docId: doc._id })
+            .sort({ epoch: 1, branchId: 1, serial: 1 })
+            .toArray();
+        return chunks;
     };
-    schema.methods.createSnapshot = async function (_name) {
-        // Implementation will create a new branch at current state
-        // TODO: Implement snapshot creation
-        throw new Error('Not implemented');
+    schema.methods.createSnapshot = async function (name) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const doc = this;
+        const Model = doc.constructor;
+        if (!Model?.createBranch) {
+            throw new Error('Cannot create snapshot: model does not have chronicle methods');
+        }
+        // Create a branch with activate: false to make it a snapshot (read-only reference point)
+        return Model.createBranch(doc._id, name, { activate: false });
     };
     schema.methods.getBranches = async function () {
-        // Implementation will return all branches for this document
-        // TODO: Implement branch listing
-        return [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const doc = this;
+        const Model = doc.constructor;
+        if (!Model?.listBranches) {
+            throw new Error('Cannot list branches: model does not have chronicle methods');
+        }
+        return Model.listBranches(doc._id);
     };
 }
 /**
  * Adds static methods to the model
  */
 function addStaticMethods(schema, options) {
-    schema.statics.findAsOf = async function (_filter, _asOf) {
-        // Implementation will rehydrate document state at given time
-        // TODO: Implement point-in-time query
-        return null;
+    schema.statics.findAsOf = async function (filter, asOf) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        // First, find all document IDs that could match (include deleted to search history)
+        const docs = await this.find(filter, { _id: 1 }, { includeDeleted: true }).lean();
+        if (docs.length === 0) {
+            return [];
+        }
+        // For each document, get its state at the given time
+        const results = [];
+        for (const doc of docs) {
+            const asOfResult = await (0, chronicle_operations_1.chronicleAsOf)(ctx, doc._id, asOf);
+            if (asOfResult.found && asOfResult.state) {
+                // Check if the rehydrated state matches the filter
+                const matchesFilter = Object.entries(filter).every(([key, value]) => {
+                    return asOfResult.state?.[key] === value;
+                });
+                if (matchesFilter) {
+                    results.push(asOfResult.state);
+                }
+            }
+        }
+        return results;
     };
     schema.statics.createBranch = async function (docId, branchName, branchOptions = {}) {
         const connection = this.db;
@@ -228,7 +270,45 @@ function addMiddleware(schema, options) {
         }
     });
     schema.pre('findOneAndUpdate', async function () {
-        // TODO: Implement findOneAndUpdate interception
+        const filter = this.getFilter();
+        const update = this.getUpdate();
+        const Model = this.model;
+        // Find the document to update
+        const doc = await Model.findOne(filter);
+        if (!doc) {
+            // No document to update - let Mongoose handle normally (or fail)
+            return;
+        }
+        // Apply the update to the document
+        // Handle $set, $unset, and direct field updates
+        if (update && typeof update === 'object') {
+            const updateObj = update;
+            // Handle $set operator
+            if (updateObj.$set && typeof updateObj.$set === 'object') {
+                Object.assign(doc, updateObj.$set);
+            }
+            // Handle $unset operator
+            if (updateObj.$unset && typeof updateObj.$unset === 'object') {
+                for (const key of Object.keys(updateObj.$unset)) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    doc[key] = undefined;
+                }
+            }
+            // Handle direct field updates (no $ operators)
+            const directUpdates = Object.entries(updateObj).filter(([key]) => !key.startsWith('$'));
+            for (const [key, value] of directUpdates) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                doc[key] = value;
+            }
+        }
+        // Save through chronicle (this will create a chunk)
+        await doc.save();
+        // Store the updated doc for post-hook to return
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        this._chronicleUpdatedDoc = doc;
+        // Modify the query to do nothing (we already saved via chronicle)
+        // Set update to empty $set to make it a no-op
+        this.setUpdate({ $set: { __chronicle_updated: Date.now() } });
     });
     // Transparent soft delete via findOneAndDelete / findByIdAndDelete
     schema.pre('findOneAndDelete', async function () {
@@ -319,13 +399,15 @@ function addMiddleware(schema, options) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return this.setOptions({ includeDeleted: true });
     };
-    // Post-find hooks to transform results
-    schema.post('find', function (_docs) {
-        // TODO: Implement document rehydration
-    });
-    schema.post('findOne', function (_doc) {
-        // TODO: Implement document rehydration
-    });
+    // Post-find hooks - placeholder for future enhancements
+    // Note: Document rehydration is not needed here because:
+    // 1. The main collection stores the current document state
+    // 2. switchBranch syncs the main collection when changing branches
+    // 3. For point-in-time queries, use chronicleAsOf() or findAsOf()
+    // These hooks could be used for:
+    // - Auto-attaching chronicle metadata to returned documents
+    // - Adding virtual properties for branch info
+    // - Performance monitoring
 }
 /**
  * Initializes chronicle collections and configuration
