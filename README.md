@@ -287,6 +287,28 @@ const preview = await Product.chronicleSquash(docId, 5, { dryRun: true, confirm:
 // Squash all history to a single point (destructive, irreversible)
 const squashResult = await Product.chronicleSquash(docId, 5, { confirm: true });
 // Returns: { success: true, previousChunkCount: 47, previousBranchCount: 5, newState: {...} }
+
+// Soft delete a document (preserves history)
+const deleteResult = await Product.chronicleSoftDelete(docId);
+// Returns: { chunkId: '...', finalState: { /* state at deletion */ } }
+
+// Restore a soft-deleted document
+const restoreResult = await Product.chronicleUndelete(docId);
+// Returns: { success: true, docId: '...', epoch: 1, restoredState: {...} }
+
+// List all soft-deleted documents
+const deletedDocs = await Product.chronicleListDeleted();
+// Returns: [{ docId, epoch, deletedAt, finalState }]
+
+// List deleted documents within a time range
+const recentDeleted = await Product.chronicleListDeleted({
+  deletedAfter: new Date('2024-01-01'),
+  deletedBefore: new Date('2024-12-31'),
+});
+
+// Permanently purge all chronicle data (destructive, irreversible)
+const purgeResult = await Product.chroniclePurge(docId, { confirm: true });
+// Returns: { success: true, docId, epochsPurged: [1], chunksRemoved: 47, branchesRemoved: 5 }
 ```
 
 ### Utility Functions

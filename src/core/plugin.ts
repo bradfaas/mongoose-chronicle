@@ -23,6 +23,10 @@ import {
   chronicleRevert as chronicleRevertOp,
   chronicleSquash as chronicleSquashOp,
   chronicleAsOf as chronicleAsOfOp,
+  chronicleSoftDelete as chronicleSoftDeleteOp,
+  chronicleUndelete as chronicleUndeleteOp,
+  chronicleListDeleted as chronicleListDeletedOp,
+  chroniclePurge as chroniclePurgeOp,
   type ChronicleContext,
   ChronicleUniqueConstraintError,
 } from './chronicle-operations';
@@ -35,6 +39,12 @@ import type {
   SquashDryRunResult,
   AsOfOptions,
   AsOfResult,
+  UndeleteOptions,
+  UndeleteResult,
+  ListDeletedFilters,
+  DeletedDocInfo,
+  PurgeOptions,
+  PurgeResult,
 } from '../types';
 
 const PLUGIN_VERSION = '1.0.0';
@@ -228,6 +238,48 @@ function addStaticMethods(schema: Schema, options: ChroniclePluginOptions): void
     const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
     return chronicleAsOfOp(ctx, docId, asOf, asOfOptions);
   };
+
+  schema.statics.chronicleSoftDelete = async function(
+    docId: Types.ObjectId
+  ): Promise<{ chunkId: Types.ObjectId; finalState: Record<string, unknown> }> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleSoftDeleteOp(ctx, docId);
+  };
+
+  schema.statics.chronicleUndelete = async function(
+    docId: Types.ObjectId,
+    undeleteOptions: UndeleteOptions = {}
+  ): Promise<UndeleteResult> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleUndeleteOp(ctx, docId, undeleteOptions);
+  };
+
+  schema.statics.chronicleListDeleted = async function(
+    filters: ListDeletedFilters = {}
+  ): Promise<DeletedDocInfo[]> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chronicleListDeletedOp(ctx, filters);
+  };
+
+  schema.statics.chroniclePurge = async function(
+    docId: Types.ObjectId,
+    purgeOptions: PurgeOptions
+  ): Promise<PurgeResult> {
+    const connection = this.db;
+    const baseCollectionName = this.collection.name;
+    const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+    const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+    return chroniclePurgeOp(ctx, docId, purgeOptions);
+  };
 }
 
 /**
@@ -286,6 +338,8 @@ function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
   });
 
   // Pre-find hooks to rehydrate documents
+  // Note: Full query rewriting is not yet implemented
+  // Use the chunks collection directly or chronicle static methods for queries
   schema.pre('find', function() {
     // TODO: Implement query rewriting for find operations
     // For now, queries work on raw chronicle data
@@ -301,6 +355,7 @@ function addMiddleware(schema: Schema, options: ChroniclePluginOptions): void {
 
   schema.pre('findOneAndDelete', async function() {
     // TODO: Implement soft delete via isDeleted flag
+    // For now, use Model.chronicleSoftDelete(docId) directly
   });
 
   // Post-find hooks to transform results

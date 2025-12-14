@@ -1,5 +1,5 @@
 import { Types, type Connection, type Document } from 'mongoose';
-import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult, AsOfOptions, AsOfResult } from '../types';
+import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult, AsOfOptions, AsOfResult, UndeleteOptions, UndeleteResult, ListDeletedFilters, DeletedDocInfo, PurgeOptions, PurgeResult } from '../types';
 /**
  * Error thrown when a unique constraint violation is detected
  */
@@ -27,6 +27,7 @@ export interface ChronicleContext {
 export interface ChronicleDocumentState {
     docId: Types.ObjectId;
     branchId: Types.ObjectId;
+    epoch: number;
     currentSerial: number;
     isNew: boolean;
     previousPayload?: Record<string, unknown>;
@@ -165,4 +166,45 @@ export declare function chronicleSquash(ctx: ChronicleContext, docId: Types.Obje
  * @returns Result containing found status, state, and metadata
  */
 export declare function chronicleAsOf(ctx: ChronicleContext, docId: Types.ObjectId, asOf: Date, options?: AsOfOptions): Promise<AsOfResult>;
+/**
+ * Performs a soft delete on a document by creating a deletion chunk.
+ * The document's chronicle history is preserved, and the isDeleted flag is set to true.
+ * This also marks the chronicle_keys entry as deleted to release unique constraints.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to soft delete
+ * @returns Result containing the deletion chunk ID and final state
+ */
+export declare function chronicleSoftDelete(ctx: ChronicleContext, docId: Types.ObjectId): Promise<{
+    chunkId: Types.ObjectId;
+    finalState: Record<string, unknown>;
+}>;
+/**
+ * Restores a soft-deleted document by creating a new chunk that marks it as not deleted.
+ * Optionally can restore to a specific epoch if multiple deletion cycles have occurred.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to restore
+ * @param options - Undelete options
+ * @returns Result containing success status and restored state
+ */
+export declare function chronicleUndelete(ctx: ChronicleContext, docId: Types.ObjectId, options?: UndeleteOptions): Promise<UndeleteResult>;
+/**
+ * Lists all soft-deleted documents for this collection.
+ *
+ * @param ctx - Chronicle context
+ * @param filters - Optional filters for the query
+ * @returns Array of deleted document info
+ */
+export declare function chronicleListDeleted(ctx: ChronicleContext, filters?: ListDeletedFilters): Promise<DeletedDocInfo[]>;
+/**
+ * Permanently deletes all chronicle data for a document.
+ * This is an irreversible operation that removes all chunks, branches, and metadata.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to purge
+ * @param options - Purge options (must include confirm: true)
+ * @returns Result containing counts of removed items
+ */
+export declare function chroniclePurge(ctx: ChronicleContext, docId: Types.ObjectId, options: PurgeOptions): Promise<PurgeResult>;
 //# sourceMappingURL=chronicle-operations.d.ts.map

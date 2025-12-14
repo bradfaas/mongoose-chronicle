@@ -192,7 +192,7 @@ describe('Index and Unique Key Handling', () => {
       );
 
       expect(lookupIndex).toBeDefined();
-      expect(lookupIndex?.[0]).toEqual({ docId: 1, branchId: 1, serial: -1 });
+      expect(lookupIndex?.[0]).toEqual({ docId: 1, epoch: 1, branchId: 1, serial: -1 });
     });
   });
 });

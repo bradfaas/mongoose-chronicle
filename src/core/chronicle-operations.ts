@@ -11,6 +11,12 @@ import type {
   SquashDryRunResult,
   AsOfOptions,
   AsOfResult,
+  UndeleteOptions,
+  UndeleteResult,
+  ListDeletedFilters,
+  DeletedDocInfo,
+  PurgeOptions,
+  PurgeResult,
 } from '../types';
 import { computeDelta, isDeltaEmpty } from '../utils/delta';
 
@@ -49,6 +55,7 @@ export interface ChronicleContext {
 export interface ChronicleDocumentState {
   docId: Types.ObjectId;
   branchId: Types.ObjectId;
+  epoch: number;
   currentSerial: number;
   isNew: boolean;
   previousPayload?: Record<string, unknown>;
@@ -207,11 +214,13 @@ export async function getOrCreateDocumentState(
   // This ensures consistency between the document's _id and chronicle tracking
   if (isNew) {
     const newBranchId = new Types.ObjectId();
+    const epoch = 1;
 
     // Create the main branch using the document's _id
     await branchCollection.insertOne({
       _id: newBranchId,
       docId: docId, // Use the MongoDB _id
+      epoch,
       parentBranchId: null,
       parentSerial: null,
       name: 'main',
@@ -223,6 +232,7 @@ export async function getOrCreateDocumentState(
       _id: new Types.ObjectId(),
       docId: docId, // Use the MongoDB _id
       activeBranchId: newBranchId,
+      epoch,
       metadataStatus: 'pending',
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -231,21 +241,28 @@ export async function getOrCreateDocumentState(
     return {
       docId: docId, // Return the MongoDB _id
       branchId: newBranchId,
+      epoch,
       currentSerial: 0,
       isNew: true,
     };
   }
 
   // For existing documents - look up by the MongoDB _id
-  const metadata = await metadataCollection.findOne({ docId });
+  // Find the latest (highest epoch) metadata for this docId
+  const metadata = await metadataCollection.findOne(
+    { docId },
+    { sort: { epoch: -1 } }
+  );
 
   if (!metadata) {
     throw new Error(`Chronicle metadata not found for document ${docId}`);
   }
 
+  const epoch = (metadata.epoch as number) ?? 1;
+
   // Get the latest chunk to find current serial
   const latestChunk = await chunksCollection.findOne(
-    { docId, branchId: metadata.activeBranchId, isLatest: true },
+    { docId, epoch, branchId: metadata.activeBranchId, isLatest: true },
     { projection: { serial: 1, payload: 1 } }
   );
 
@@ -258,6 +275,7 @@ export async function getOrCreateDocumentState(
   return {
     docId,
     branchId: metadata.activeBranchId as Types.ObjectId,
+    epoch,
     currentSerial: (latestChunk?.serial as number) ?? 0,
     isNew: false,
     previousPayload,
@@ -361,10 +379,11 @@ export async function createChronicleChunk(
   // Clear isLatest on previous chunks
   await clearIsLatestFlag(ctx, state.docId, state.branchId);
 
-  // Insert the new chunk
+  // Insert the new chunk with epoch
   await chunksCollection.insertOne({
     _id: chunkId,
     docId: state.docId,
+    epoch: state.epoch,
     branchId: state.branchId,
     serial: newSerial,
     ccType,
@@ -529,6 +548,7 @@ export async function createBranch(
   }
 
   const parentBranchId = metadata.activeBranchId as Types.ObjectId;
+  const epoch = (metadata.epoch as number) ?? 1;
 
   // Determine the serial to branch from
   let parentSerial: number;
@@ -562,6 +582,7 @@ export async function createBranch(
   const branchDoc: ChronicleBranch = {
     _id: newBranchId,
     docId,
+    epoch,
     parentBranchId,
     parentSerial,
     name: branchName,
@@ -586,6 +607,7 @@ export async function createBranch(
   await chunksCollection.insertOne({
     _id: new Types.ObjectId(),
     docId,
+    epoch,
     branchId: newBranchId,
     serial: 1,
     ccType: 1, // FULL
@@ -980,10 +1002,13 @@ export async function chronicleSquash(
   // Create new main branch
   const newBranchId = new Types.ObjectId();
   const now = new Date();
+  // After squash, reset to epoch 1
+  const newEpoch = 1;
 
   await branchCollection.insertOne({
     _id: newBranchId,
     docId,
+    epoch: newEpoch,
     parentBranchId: null,
     parentSerial: null,
     name: 'main',
@@ -994,6 +1019,7 @@ export async function chronicleSquash(
   await chunksCollection.insertOne({
     _id: new Types.ObjectId(),
     docId,
+    epoch: newEpoch,
     branchId: newBranchId,
     serial: 1,
     ccType: 1, // FULL
@@ -1003,12 +1029,13 @@ export async function chronicleSquash(
     payload: newBaseState,
   });
 
-  // Update metadata to point to new main branch
+  // Update metadata to point to new main branch and reset epoch
   await metadataCollection.updateOne(
     { docId },
     {
       $set: {
         activeBranchId: newBranchId,
+        epoch: newEpoch,
         metadataStatus: 'active',
         updatedAt: now,
       },
@@ -1215,4 +1242,314 @@ async function chronicleAsOfAllBranches(
 
   // Rehydrate from the winning branch
   return chronicleAsOfSingleBranch(ctx, docId, asOf, best.branchId, chunksCollection);
+}
+
+/**
+ * Performs a soft delete on a document by creating a deletion chunk.
+ * The document's chronicle history is preserved, and the isDeleted flag is set to true.
+ * This also marks the chronicle_keys entry as deleted to release unique constraints.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to soft delete
+ * @returns Result containing the deletion chunk ID and final state
+ */
+export async function chronicleSoftDelete(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId
+): Promise<{ chunkId: Types.ObjectId; finalState: Record<string, unknown> }> {
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!metadataCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Get the current document state
+  const metadata = await metadataCollection.findOne(
+    { docId },
+    { sort: { epoch: -1 } }
+  );
+
+  if (!metadata) {
+    throw new Error(`Chronicle metadata not found for document ${docId}`);
+  }
+
+  const branchId = metadata.activeBranchId as Types.ObjectId;
+  const epoch = (metadata.epoch as number) ?? 1;
+
+  // Get the latest chunk to find current serial and payload
+  const latestChunk = await chunksCollection.findOne(
+    { docId, epoch, branchId, isLatest: true },
+    { projection: { serial: 1, payload: 1, isDeleted: 1 } }
+  );
+
+  if (!latestChunk) {
+    throw new Error(`No chunks found for document ${docId} on active branch`);
+  }
+
+  // Check if already deleted
+  if (latestChunk.isDeleted) {
+    throw new Error(`Document ${docId} is already deleted`);
+  }
+
+  // Rehydrate the final state before deletion
+  const finalState = await rehydrateDocument(ctx, docId, branchId);
+  if (!finalState) {
+    throw new Error(`Failed to rehydrate document ${docId} for deletion`);
+  }
+
+  // Create the document state for chunk creation
+  const state: ChronicleDocumentState = {
+    docId,
+    branchId,
+    epoch,
+    currentSerial: latestChunk.serial as number,
+    isNew: false,
+    previousPayload: finalState,
+  };
+
+  // Create a deletion chunk (FULL chunk with isDeleted: true)
+  // The payload contains the final state at time of deletion
+  const chunkId = await createChronicleChunk(
+    ctx,
+    state,
+    finalState,
+    1, // FULL chunk
+    true // isDeleted
+  );
+
+  // Mark the chronicle_keys entry as deleted to release unique constraints
+  await updateChronicleKeys(ctx, docId, branchId, finalState, true);
+
+  return { chunkId, finalState };
+}
+
+/**
+ * Restores a soft-deleted document by creating a new chunk that marks it as not deleted.
+ * Optionally can restore to a specific epoch if multiple deletion cycles have occurred.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to restore
+ * @param options - Undelete options
+ * @returns Result containing success status and restored state
+ */
+export async function chronicleUndelete(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  options: UndeleteOptions = {}
+): Promise<UndeleteResult> {
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!metadataCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Determine which epoch to restore
+  let targetEpoch: number;
+  if (options.epoch !== undefined) {
+    targetEpoch = options.epoch;
+  } else {
+    // Find the latest epoch for this document
+    const metadata = await metadataCollection.findOne(
+      { docId },
+      { sort: { epoch: -1 } }
+    );
+    if (!metadata) {
+      throw new Error(`Chronicle metadata not found for document ${docId}`);
+    }
+    targetEpoch = (metadata.epoch as number) ?? 1;
+  }
+
+  // Get metadata for the target epoch
+  const metadata = await metadataCollection.findOne({ docId, epoch: targetEpoch });
+  if (!metadata) {
+    throw new Error(`Chronicle metadata not found for document ${docId} at epoch ${targetEpoch}`);
+  }
+
+  const branchId = options.branchId ?? (metadata.activeBranchId as Types.ObjectId);
+
+  // Get the latest chunk to verify it's deleted
+  const latestChunk = await chunksCollection.findOne(
+    { docId, epoch: targetEpoch, branchId, isLatest: true },
+    { projection: { serial: 1, payload: 1, isDeleted: 1 } }
+  );
+
+  if (!latestChunk) {
+    throw new Error(`No chunks found for document ${docId} at epoch ${targetEpoch}`);
+  }
+
+  if (!latestChunk.isDeleted) {
+    throw new Error(`Document ${docId} at epoch ${targetEpoch} is not deleted`);
+  }
+
+  // The deletion chunk contains the final state - use that as the restored state
+  const restoredState = latestChunk.payload as Record<string, unknown>;
+
+  // Validate unique constraints for the restored state
+  await validateUniqueConstraints(ctx, restoredState, branchId, docId);
+
+  // Create the document state for chunk creation
+  const state: ChronicleDocumentState = {
+    docId,
+    branchId,
+    epoch: targetEpoch,
+    currentSerial: latestChunk.serial as number,
+    isNew: false,
+    previousPayload: restoredState,
+  };
+
+  // Create a restoration chunk (FULL chunk with isDeleted: false)
+  await createChronicleChunk(
+    ctx,
+    state,
+    restoredState,
+    1, // FULL chunk
+    false // isDeleted: false (restored)
+  );
+
+  // Update chronicle_keys to mark as not deleted
+  await updateChronicleKeys(ctx, docId, branchId, restoredState, false);
+
+  return {
+    success: true,
+    docId,
+    epoch: targetEpoch,
+    restoredState,
+  };
+}
+
+/**
+ * Lists all soft-deleted documents for this collection.
+ *
+ * @param ctx - Chronicle context
+ * @param filters - Optional filters for the query
+ * @returns Array of deleted document info
+ */
+export async function chronicleListDeleted(
+  ctx: ChronicleContext,
+  filters: ListDeletedFilters = {}
+): Promise<DeletedDocInfo[]> {
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+
+  if (!chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Build query for deleted documents using the partial index
+  const query: Record<string, unknown> = {
+    isLatest: true,
+    isDeleted: true,
+  };
+
+  // Add time filters if provided
+  if (filters.deletedAfter || filters.deletedBefore) {
+    query.cTime = {};
+    if (filters.deletedAfter) {
+      (query.cTime as Record<string, unknown>).$gt = filters.deletedAfter;
+    }
+    if (filters.deletedBefore) {
+      (query.cTime as Record<string, unknown>).$lt = filters.deletedBefore;
+    }
+  }
+
+  // Query for all deleted chunks (using the partial index on isLatest + isDeleted)
+  const deletedChunks = await chunksCollection
+    .find(query)
+    .sort({ cTime: -1 })
+    .toArray();
+
+  // Transform to DeletedDocInfo format
+  return deletedChunks.map(chunk => ({
+    docId: chunk.docId as Types.ObjectId,
+    epoch: (chunk.epoch as number) ?? 1,
+    deletedAt: chunk.cTime as Date,
+    finalState: chunk.payload as Record<string, unknown>,
+  }));
+}
+
+/**
+ * Permanently deletes all chronicle data for a document.
+ * This is an irreversible operation that removes all chunks, branches, and metadata.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to purge
+ * @param options - Purge options (must include confirm: true)
+ * @returns Result containing counts of removed items
+ */
+export async function chroniclePurge(
+  ctx: ChronicleContext,
+  docId: Types.ObjectId,
+  options: PurgeOptions
+): Promise<PurgeResult> {
+  // Safety check - require explicit confirmation
+  if (options.confirm !== true) {
+    throw new Error('Purge requires explicit confirmation. Set options.confirm = true to execute.');
+  }
+
+  const metadataCollectionName = ctx.options.metadataCollectionName ??
+    `${ctx.baseCollectionName}_chronicle_metadata`;
+  const branchCollectionName = `${ctx.baseCollectionName}_chronicle_branches`;
+  const keysCollectionName = `${ctx.baseCollectionName}_chronicle_keys`;
+
+  const metadataCollection = ctx.connection.db?.collection(metadataCollectionName);
+  const branchCollection = ctx.connection.db?.collection(branchCollectionName);
+  const chunksCollection = ctx.connection.db?.collection(ctx.chunksCollectionName);
+  const keysCollection = ctx.connection.db?.collection(keysCollectionName);
+
+  if (!metadataCollection || !branchCollection || !chunksCollection) {
+    throw new Error('Chronicle collections not initialized');
+  }
+
+  // Build query - optionally filter by specific epoch
+  const epochQuery: Record<string, unknown> = { docId };
+  if (options.epoch !== undefined) {
+    epochQuery.epoch = options.epoch;
+  }
+
+  // Get list of epochs being purged
+  const metadataDocs = await metadataCollection.find(epochQuery).toArray();
+  const epochsPurged = metadataDocs.map(m => (m.epoch as number) ?? 1);
+
+  if (epochsPurged.length === 0) {
+    throw new Error(`No chronicle data found for document ${docId}`);
+  }
+
+  // Delete chunks
+  const chunkQuery: Record<string, unknown> = { docId };
+  if (options.epoch !== undefined) {
+    chunkQuery.epoch = options.epoch;
+  }
+  const chunkResult = await chunksCollection.deleteMany(chunkQuery);
+  const chunksRemoved = chunkResult.deletedCount;
+
+  // Delete branches
+  const branchQuery: Record<string, unknown> = { docId };
+  if (options.epoch !== undefined) {
+    branchQuery.epoch = options.epoch;
+  }
+  const branchResult = await branchCollection.deleteMany(branchQuery);
+  const branchesRemoved = branchResult.deletedCount;
+
+  // Delete metadata
+  await metadataCollection.deleteMany(epochQuery);
+
+  // Delete keys entries if keys collection exists
+  if (keysCollection) {
+    await keysCollection.deleteMany({ docId });
+  }
+
+  return {
+    success: true,
+    docId,
+    epochsPurged,
+    chunksRemoved,
+    branchesRemoved,
+  };
 }

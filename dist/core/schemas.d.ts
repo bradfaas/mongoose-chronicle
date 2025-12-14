@@ -13,11 +13,13 @@ export declare const ChronicleMetadataSchema: Schema<any, import("mongoose").Mod
 }, {
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     activeBranchId: Types.ObjectId;
     metadataStatus: "pending" | "active" | "orphaned";
 } & import("mongoose").DefaultTimestampProps, import("mongoose").Document<unknown, {}, import("mongoose").FlatRecord<{
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     activeBranchId: Types.ObjectId;
     metadataStatus: "pending" | "active" | "orphaned";
 } & import("mongoose").DefaultTimestampProps>, {}, import("mongoose").ResolveSchemaOptions<{
@@ -25,6 +27,7 @@ export declare const ChronicleMetadataSchema: Schema<any, import("mongoose").Mod
 }>> & import("mongoose").FlatRecord<{
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     activeBranchId: Types.ObjectId;
     metadataStatus: "pending" | "active" | "orphaned";
 } & import("mongoose").DefaultTimestampProps> & Required<{
@@ -43,6 +46,7 @@ export declare const ChronicleBranchSchema: Schema<any, import("mongoose").Model
 }, {
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     name: string;
     parentBranchId: Types.ObjectId;
     parentSerial: number;
@@ -50,6 +54,7 @@ export declare const ChronicleBranchSchema: Schema<any, import("mongoose").Model
 }, import("mongoose").Document<unknown, {}, import("mongoose").FlatRecord<{
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     name: string;
     parentBranchId: Types.ObjectId;
     parentSerial: number;
@@ -62,6 +67,7 @@ export declare const ChronicleBranchSchema: Schema<any, import("mongoose").Model
 }>> & import("mongoose").FlatRecord<{
     _id: Types.ObjectId;
     docId: Types.ObjectId;
+    epoch: number;
     name: string;
     parentBranchId: Types.ObjectId;
     parentSerial: number;

@@ -53,6 +53,8 @@ export interface ChronicleMetadata {
     docId: Types.ObjectId;
     /** Currently active branch for this document */
     activeBranchId: Types.ObjectId;
+    /** Epoch/generation number - increments when doc is recreated after deletion */
+    epoch: number;
     /** Status of metadata: 'pending' | 'active' | 'orphaned' */
     metadataStatus: 'pending' | 'active' | 'orphaned';
     /** Creation timestamp */
@@ -68,6 +70,8 @@ export interface ChronicleBranch {
     _id: Types.ObjectId;
     /** The docId this branch belongs to */
     docId: Types.ObjectId;
+    /** Epoch/generation number */
+    epoch: number;
     /** Parent branch ID (null for main branch) */
     parentBranchId: Types.ObjectId | null;
     /** Serial number in parent branch where this branch was created */
@@ -86,6 +90,8 @@ export interface ChronicleChunk<T = Record<string, unknown>> {
     _id: Types.ObjectId;
     /** Identifies the unique original document */
     docId: Types.ObjectId;
+    /** Epoch/generation number - supports document re-creation after deletion */
+    epoch: number;
     /** Branch this chunk belongs to */
     branchId: Types.ObjectId;
     /** Sequential number within the branch, starts at 1 */
@@ -324,5 +330,94 @@ export interface ChronicleModel<T extends Document> {
      * Rehydrates the document from chunks created at or before the given timestamp.
      */
     chronicleAsOf(docId: Types.ObjectId, asOf: Date, options?: AsOfOptions): Promise<AsOfResult>;
+    /**
+     * Soft delete a document by creating a deletion chunk.
+     * The document's chronicle history is preserved.
+     */
+    chronicleSoftDelete(docId: Types.ObjectId): Promise<{
+        chunkId: Types.ObjectId;
+        finalState: Record<string, unknown>;
+    }>;
+    /**
+     * Restore a soft-deleted document.
+     */
+    chronicleUndelete(docId: Types.ObjectId, options?: UndeleteOptions): Promise<UndeleteResult>;
+    /**
+     * List all soft-deleted documents.
+     */
+    chronicleListDeleted(filters?: ListDeletedFilters): Promise<DeletedDocInfo[]>;
+    /**
+     * Permanently remove all chronicle data for a document.
+     * This is irreversible and requires explicit confirmation.
+     */
+    chroniclePurge(docId: Types.ObjectId, options: PurgeOptions): Promise<PurgeResult>;
+}
+/**
+ * Options for restoring a soft-deleted document
+ */
+export interface UndeleteOptions {
+    /** Which incarnation to restore (default: latest epoch) */
+    epoch?: number;
+    /** Which branch to restore from (default: main at deletion) */
+    branchId?: Types.ObjectId;
+}
+/**
+ * Result of restoring a soft-deleted document
+ */
+export interface UndeleteResult {
+    /** Whether the operation succeeded */
+    success: boolean;
+    /** The document ID */
+    docId: Types.ObjectId;
+    /** The epoch of the restored document */
+    epoch: number;
+    /** The restored document state */
+    restoredState: Record<string, unknown>;
+}
+/**
+ * Filters for listing deleted documents
+ */
+export interface ListDeletedFilters {
+    /** Only include documents deleted after this date */
+    deletedAfter?: Date;
+    /** Only include documents deleted before this date */
+    deletedBefore?: Date;
+}
+/**
+ * Information about a deleted document
+ */
+export interface DeletedDocInfo {
+    /** The document ID */
+    docId: Types.ObjectId;
+    /** The epoch/generation of the deleted document */
+    epoch: number;
+    /** When the document was deleted */
+    deletedAt: Date;
+    /** The final state before deletion */
+    finalState: Record<string, unknown>;
+}
+/**
+ * Options for permanently purging chronicle data
+ */
+export interface PurgeOptions {
+    /** Safety flag - must be true to execute (required) */
+    confirm: true;
+    /** Purge only a specific epoch (default: all epochs) */
+    epoch?: number;
+}
+/**
+ * Result of a chronicle purge operation
+ */
+export interface PurgeResult {
+    /** Whether the operation succeeded */
+    success: boolean;
+    /** The document ID */
+    docId: Types.ObjectId;
+    /** Which epochs were purged */
+    epochsPurged: number[];
+    /** Number of chunks removed */
+    chunksRemoved: number;
+    /** Number of branches removed */
+    branchesRemoved: number;
 }
 //# sourceMappingURL=index.d.ts.map

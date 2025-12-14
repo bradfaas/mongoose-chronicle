@@ -21,6 +21,12 @@ function createChronicleChunkSchema(_payloadSchema) {
             type: mongoose_1.Schema.Types.ObjectId,
             required: true,
         },
+        // Epoch/generation number - supports document re-creation after deletion
+        epoch: {
+            type: Number,
+            required: true,
+            default: 1,
+        },
         // Branch this chunk belongs to
         branchId: {
             type: mongoose_1.Schema.Types.ObjectId,
@@ -68,12 +74,14 @@ function createChronicleChunkSchema(_payloadSchema) {
         collection: undefined, // Will be set during plugin initialization
     });
     // Core indexes for chronicle operations
-    // Primary lookup: find chunks for a document on a branch, ordered by serial
-    schema.index({ docId: 1, branchId: 1, serial: -1 }, { name: 'chronicle_lookup' });
+    // Primary lookup: find chunks for a document on a branch, ordered by serial (includes epoch)
+    schema.index({ docId: 1, epoch: 1, branchId: 1, serial: -1 }, { name: 'chronicle_lookup' });
     // Point-in-time queries
     schema.index({ branchId: 1, cTime: -1 }, { name: 'chronicle_time' });
     // Latest chunk lookup (efficient current state queries)
-    schema.index({ docId: 1, branchId: 1, isLatest: 1 }, { name: 'chronicle_latest', partialFilterExpression: { isLatest: true } });
+    schema.index({ docId: 1, epoch: 1, branchId: 1, isLatest: 1 }, { name: 'chronicle_latest', partialFilterExpression: { isLatest: true } });
+    // Deleted documents lookup
+    schema.index({ docId: 1, isLatest: 1, isDeleted: 1 }, { name: 'chronicle_deleted', partialFilterExpression: { isLatest: true, isDeleted: true } });
     return schema;
 }
 /**
@@ -88,12 +96,16 @@ exports.ChronicleMetadataSchema = new mongoose_1.Schema({
     docId: {
         type: mongoose_1.Schema.Types.ObjectId,
         required: true,
-        unique: true,
         index: true,
     },
     activeBranchId: {
         type: mongoose_1.Schema.Types.ObjectId,
         required: true,
+    },
+    epoch: {
+        type: Number,
+        required: true,
+        default: 1,
     },
     metadataStatus: {
         type: String,
@@ -104,6 +116,8 @@ exports.ChronicleMetadataSchema = new mongoose_1.Schema({
 }, {
     timestamps: true,
 });
+// Compound unique index for docId + epoch (allows multiple epochs per docId)
+exports.ChronicleMetadataSchema.index({ docId: 1, epoch: 1 }, { unique: true });
 /**
  * Schema for Chronicle Branch documents
  */
@@ -116,6 +130,11 @@ exports.ChronicleBranchSchema = new mongoose_1.Schema({
         type: mongoose_1.Schema.Types.ObjectId,
         required: true,
         index: true,
+    },
+    epoch: {
+        type: Number,
+        required: true,
+        default: 1,
     },
     parentBranchId: {
         type: mongoose_1.Schema.Types.ObjectId,

@@ -132,6 +132,34 @@ function addStaticMethods(schema, options) {
         const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
         return (0, chronicle_operations_1.chronicleAsOf)(ctx, docId, asOf, asOfOptions);
     };
+    schema.statics.chronicleSoftDelete = async function (docId) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleSoftDelete)(ctx, docId);
+    };
+    schema.statics.chronicleUndelete = async function (docId, undeleteOptions = {}) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleUndelete)(ctx, docId, undeleteOptions);
+    };
+    schema.statics.chronicleListDeleted = async function (filters = {}) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chronicleListDeleted)(ctx, filters);
+    };
+    schema.statics.chroniclePurge = async function (docId, purgeOptions) {
+        const connection = this.db;
+        const baseCollectionName = this.collection.name;
+        const chunksCollectionName = `${baseCollectionName}_chronicle_chunks`;
+        const ctx = createChronicleContext(connection, baseCollectionName, chunksCollectionName, options);
+        return (0, chronicle_operations_1.chroniclePurge)(ctx, docId, purgeOptions);
+    };
 }
 /**
  * Creates a chronicle context for operations
@@ -179,6 +207,8 @@ function addMiddleware(schema, options) {
         }
     });
     // Pre-find hooks to rehydrate documents
+    // Note: Full query rewriting is not yet implemented
+    // Use the chunks collection directly or chronicle static methods for queries
     schema.pre('find', function () {
         // TODO: Implement query rewriting for find operations
         // For now, queries work on raw chronicle data
@@ -191,6 +221,7 @@ function addMiddleware(schema, options) {
     });
     schema.pre('findOneAndDelete', async function () {
         // TODO: Implement soft delete via isDeleted flag
+        // For now, use Model.chronicleSoftDelete(docId) directly
     });
     // Post-find hooks to transform results
     schema.post('find', function (_docs) {
