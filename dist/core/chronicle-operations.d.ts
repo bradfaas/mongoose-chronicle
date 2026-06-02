@@ -1,0 +1,210 @@
+import { Types, type Connection, type Document } from 'mongoose';
+import type { ChroniclePluginOptions, ChunkType, ChronicleBranch, CreateBranchOptions, RevertOptions, RevertResult, SquashOptions, SquashResult, SquashDryRunResult, AsOfOptions, AsOfResult, UndeleteOptions, UndeleteResult, ListDeletedFilters, DeletedDocInfo, PurgeOptions, PurgeResult } from '../types';
+/**
+ * Error thrown when a unique constraint violation is detected
+ */
+export declare class ChronicleUniqueConstraintError extends Error {
+    field: string;
+    value: unknown;
+    constructor(field: string, value: unknown);
+}
+/**
+ * Context for chronicle operations, passed to middleware
+ */
+export interface ChronicleContext {
+    connection: Connection;
+    /** The base collection name (original model collection) */
+    baseCollectionName: string;
+    /** The collection name for chronicle chunks */
+    chunksCollectionName: string;
+    options: ChroniclePluginOptions;
+    uniqueFields: string[];
+    indexedFields: string[];
+}
+/**
+ * Result of looking up or creating chronicle metadata for a document
+ */
+export interface ChronicleDocumentState {
+    docId: Types.ObjectId;
+    branchId: Types.ObjectId;
+    epoch: number;
+    currentSerial: number;
+    isNew: boolean;
+    previousPayload?: Record<string, unknown>;
+}
+/**
+ * Validates that unique fields don't conflict with existing documents
+ * @param ctx - Chronicle context
+ * @param payload - The document payload to validate
+ * @param excludeDocId - DocId to exclude from check (for updates)
+ * @param branchId - Branch to check uniqueness within
+ */
+export declare function validateUniqueConstraints(ctx: ChronicleContext, payload: Record<string, unknown>, branchId: Types.ObjectId, excludeDocId?: Types.ObjectId): Promise<void>;
+/**
+ * Updates the chronicle keys collection with new unique key values
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID
+ * @param payload - The full document payload
+ * @param isDeleted - Whether the document is being deleted
+ */
+export declare function updateChronicleKeys(ctx: ChronicleContext, docId: Types.ObjectId, branchId: Types.ObjectId, payload: Record<string, unknown>, isDeleted?: boolean): Promise<void>;
+/**
+ * Marks previous chunks as not latest
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID
+ */
+export declare function clearIsLatestFlag(ctx: ChronicleContext, docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
+/**
+ * Gets or creates the chronicle metadata for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID (MongoDB _id - Mongoose assigns this before save even for new docs)
+ * @param isNew - Whether this is a new document being created
+ * @returns The document state including branch and serial info
+ */
+export declare function getOrCreateDocumentState(ctx: ChronicleContext, docId: Types.ObjectId, isNew: boolean): Promise<ChronicleDocumentState>;
+/**
+ * Rehydrates a document from its chunks
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID
+ * @param asOf - Optional timestamp for point-in-time query
+ */
+export declare function rehydrateDocument(ctx: ChronicleContext, docId: Types.ObjectId, branchId: Types.ObjectId, asOf?: Date): Promise<Record<string, unknown> | undefined>;
+/**
+ * Creates a new chronicle chunk
+ * @param ctx - Chronicle context
+ * @param state - Document state from getOrCreateDocumentState
+ * @param payload - The document payload (full or delta)
+ * @param ccType - Chunk type (1=FULL, 2=DELTA)
+ * @param isDeleted - Whether this marks a deletion
+ */
+export declare function createChronicleChunk(ctx: ChronicleContext, state: ChronicleDocumentState, payload: Record<string, unknown>, ccType: ChunkType, isDeleted?: boolean): Promise<Types.ObjectId>;
+/**
+ * Determines whether to write a full chunk or delta based on the interval
+ * @param currentSerial - Current serial number
+ * @param fullChunkInterval - Configured interval for full chunks
+ */
+export declare function shouldWriteFullChunk(currentSerial: number, fullChunkInterval: number): boolean;
+/**
+ * Finalizes the chronicle operation by updating metadata status
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ */
+export declare function finalizeChronicleOperation(ctx: ChronicleContext, docId: Types.ObjectId): Promise<void>;
+/**
+ * Processes a document save operation for chronicle
+ * @param ctx - Chronicle context
+ * @param doc - The mongoose document being saved
+ * @param isNew - Whether this is a new document
+ */
+export declare function processChroniclesSave(ctx: ChronicleContext, doc: Document, isNew: boolean): Promise<{
+    docId: Types.ObjectId;
+    chunkId: Types.ObjectId;
+}>;
+/**
+ * Creates a new branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchName - Name for the new branch
+ * @param options - Branch creation options
+ * @returns The created branch
+ */
+export declare function createBranch(ctx: ChronicleContext, docId: Types.ObjectId, branchName: string, options?: CreateBranchOptions): Promise<ChronicleBranch>;
+/**
+ * Switches the active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param branchId - Branch ID to switch to
+ */
+export declare function switchBranch(ctx: ChronicleContext, docId: Types.ObjectId, branchId: Types.ObjectId): Promise<void>;
+/**
+ * Lists all branches for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns Array of branches
+ */
+export declare function listBranches(ctx: ChronicleContext, docId: Types.ObjectId): Promise<ChronicleBranch[]>;
+/**
+ * Gets the currently active branch for a document
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @returns The active branch or null if not found
+ */
+export declare function getActiveBranch(ctx: ChronicleContext, docId: Types.ObjectId): Promise<ChronicleBranch | null>;
+/**
+ * Reverts a branch's history to a specific serial, removing all chunks newer than the target.
+ * This operation only affects the specified branch and does not touch other branches.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to revert to (becomes the new "latest")
+ * @param options - Revert options
+ * @returns Result containing success status, counts, and optionally the rehydrated state
+ */
+export declare function chronicleRevert(ctx: ChronicleContext, docId: Types.ObjectId, serial: number, options?: RevertOptions): Promise<RevertResult>;
+/**
+ * Squashes all chronicle history into a single FULL chunk representing a chosen point in time.
+ * This is a destructive, irreversible operation that removes all branches and history.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param serial - The serial number to use as the new base state
+ * @param options - Squash options (confirm must be true to execute)
+ * @returns Result containing success status, previous counts, and the new state
+ */
+export declare function chronicleSquash(ctx: ChronicleContext, docId: Types.ObjectId, serial: number, options: SquashOptions): Promise<SquashResult | SquashDryRunResult>;
+/**
+ * Gets the document state at a specific point in time.
+ * Rehydrates the document from chunks created at or before the given timestamp.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID
+ * @param asOf - The timestamp to query
+ * @param options - Query options (branchId or searchAllBranches)
+ * @returns Result containing found status, state, and metadata
+ */
+export declare function chronicleAsOf(ctx: ChronicleContext, docId: Types.ObjectId, asOf: Date, options?: AsOfOptions): Promise<AsOfResult>;
+/**
+ * Performs a soft delete on a document by creating a deletion chunk.
+ * The document's chronicle history is preserved, and the isDeleted flag is set to true.
+ * This also marks the chronicle_keys entry as deleted to release unique constraints.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to soft delete
+ * @returns Result containing the deletion chunk ID and final state
+ */
+export declare function chronicleSoftDelete(ctx: ChronicleContext, docId: Types.ObjectId): Promise<{
+    chunkId: Types.ObjectId;
+    finalState: Record<string, unknown>;
+}>;
+/**
+ * Restores a soft-deleted document by creating a new chunk that marks it as not deleted.
+ * Optionally can restore to a specific epoch if multiple deletion cycles have occurred.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to restore
+ * @param options - Undelete options
+ * @returns Result containing success status and restored state
+ */
+export declare function chronicleUndelete(ctx: ChronicleContext, docId: Types.ObjectId, options?: UndeleteOptions): Promise<UndeleteResult>;
+/**
+ * Lists all soft-deleted documents for this collection.
+ *
+ * @param ctx - Chronicle context
+ * @param filters - Optional filters for the query
+ * @returns Array of deleted document info
+ */
+export declare function chronicleListDeleted(ctx: ChronicleContext, filters?: ListDeletedFilters): Promise<DeletedDocInfo[]>;
+/**
+ * Permanently deletes all chronicle data for a document.
+ * This is an irreversible operation that removes all chunks, branches, and metadata.
+ *
+ * @param ctx - Chronicle context
+ * @param docId - Document ID to purge
+ * @param options - Purge options (must include confirm: true)
+ * @returns Result containing counts of removed items
+ */
+export declare function chroniclePurge(ctx: ChronicleContext, docId: Types.ObjectId, options: PurgeOptions): Promise<PurgeResult>;
+//# sourceMappingURL=chronicle-operations.d.ts.map

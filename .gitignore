@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+# Note: dist/ is NOT ignored - it's committed so the package can be installed from GitHub
+
+# Coverage
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test
+*.lcov
+
+# Temporary files
+tmp/
+temp/
+
+# Claude Code
+CLAUDE.md
