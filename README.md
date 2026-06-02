@@ -1035,23 +1035,3 @@ The following features are planned but not yet fully implemented:
 - `updateOne` / `updateMany` middleware - these query-based updates bypass chronicle tracking (use `findOneAndUpdate` or `doc.save()` instead)
 
 **Note:** All core CRUD operations are implemented. Point-in-time queries are available via `chronicleAsOf()` (single document) and `findAsOf()` (multi-document with filter). Document instance methods (`getHistory()`, `getBranches()`, `createSnapshot()`) are fully implemented.
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Run tests
-npm test
-
-# Build
-npm run build
-
-# Lint
-npm run lint
-```
-
-## License
-
-MIT
